@@ -83,8 +83,7 @@ export default function FundingTable() {
 
   const fetchData = useCallback(async () => {
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || ''
-      const res = await fetch(`${apiUrl}/api/funding?limit=100`)
+      const res = await fetch(`/api/funding?limit=100`)
       if (!res.ok) throw new Error('fetch failed')
       const json = await res.json()
       setData(json)
