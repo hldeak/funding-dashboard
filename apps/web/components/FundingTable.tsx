@@ -79,6 +79,7 @@ export default function FundingTable() {
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [, setTick] = useState(0)
+  const [search, setSearch] = useState('')
   const intervalRef = useRef<ReturnType<typeof setInterval>>()
 
   const fetchData = useCallback(async () => {
@@ -108,7 +109,11 @@ export default function FundingTable() {
     return () => clearInterval(id)
   }, [])
 
-  const sorted = [...data].sort((a, b) => {
+  const filtered = search.trim()
+    ? data.filter(d => d.asset.toLowerCase().includes(search.trim().toLowerCase()))
+    : data
+
+  const sorted = [...filtered].sort((a, b) => {
     const va = getSortValue(a, sortKey)
     const vb = getSortValue(b, sortKey)
     const cmp = typeof va === 'string' ? va.localeCompare(vb as string) : (va as number) - (vb as number)
@@ -175,6 +180,17 @@ export default function FundingTable() {
           </div>
         </div>
       )}
+
+      {/* Search */}
+      <div className="mb-4">
+        <input
+          type="text"
+          placeholder="Search assets (BTC, ETH, SOL...)"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          className="w-full sm:w-72 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500"
+        />
+      </div>
 
       {/* Table */}
       <div className="bg-gray-900 border border-gray-700 rounded-lg overflow-hidden">

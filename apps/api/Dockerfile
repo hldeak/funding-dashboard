@@ -1,12 +1,14 @@
 FROM oven/bun:1 AS base
-WORKDIR /app
 
-# Copy shared types
+# Set up monorepo structure matching local dev
+WORKDIR /repo
+
+# Copy shared types (mirrors local packages/shared/src)
 COPY packages/shared/src ./packages/shared/src
 
-# Copy API package files and install deps
+# Copy API and install deps
 COPY apps/api/package.json ./apps/api/package.json
-WORKDIR /app/apps/api
+WORKDIR /repo/apps/api
 RUN bun install --production
 
 # Copy API source
