@@ -134,7 +134,7 @@ export default function FundingTable() {
   const headers: { key: SortKey; label: string }[] = [
     { key: 'asset', label: 'Asset' },
     { key: 'hl', label: 'HL Rate' },
-    { key: 'binance', label: 'Gate.io' },
+    { key: 'binance', label: 'MEXC' },
     { key: 'bybit', label: 'Bitget' },
     { key: 'okx', label: 'OKX' },
     { key: 'spread', label: 'Spread' },
