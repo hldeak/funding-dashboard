@@ -3,7 +3,7 @@ import type { FundingRate } from '../../../../packages/shared/src/types'
 export async function fetchBinance(): Promise<FundingRate[]> {
   const start = Date.now()
   try {
-    const res = await fetch('https://api.gateio.ws/api/v4/futures/usdt/contracts?limit=1000&settle=usdt')
+    const res = await fetch('https://api.gateio.ws/api/v4/futures/usdt/contracts?limit=1000')
     if (!res.ok) throw new Error(`Gate.io ${res.status}`)
     const contracts = (await res.json()) as any[]
     const now = Date.now()
