@@ -52,6 +52,9 @@ interface MarketContext {
   okxRate8h: number
   maxSpread: number
   openInterest: number
+  markPrice: number | null
+  change24h: number | null
+  volume24h: number | null
 }
 
 interface Decision {
@@ -74,17 +77,23 @@ function buildMarketContext(spreads: FundingSpread[]): MarketContext[] {
       okxRate8h: s.okx?.rate8h ?? 0,
       maxSpread: s.maxSpread,
       openInterest: s.hl?.openInterest ?? 0,
+      markPrice: s.hl?.markPrice ?? null,
+      change24h: s.hl?.change24h ?? null,
+      volume24h: s.hl?.volume24h ?? null,
     }))
 }
 
 function formatMarketTable(ctx: MarketContext[]): string {
-  const lines = ['Asset      | HL Rate 8h | Binance   | Bybit     | OKX       | Spread    | OI ($M)']
-  lines.push('-'.repeat(90))
+  const lines = ['Asset      | Price     | 24h Chg  | HL Rate 8h | Spread    | OI ($M) | Vol24h($M)']
+  lines.push('-'.repeat(95))
   for (const m of ctx) {
-    const fmt = (n: number) => (n * 100).toFixed(4).padStart(8) + '%'
+    const fmtRate = (n: number) => (n * 100).toFixed(4).padStart(8) + '%'
+    const price = m.markPrice != null ? `$${m.markPrice < 1 ? m.markPrice.toFixed(5) : m.markPrice.toFixed(2)}`.padStart(9) : '       N/A'
+    const chg = m.change24h != null ? `${m.change24h >= 0 ? '+' : ''}${m.change24h.toFixed(2)}%`.padStart(8) : '     N/A'
     const oi = (m.openInterest / 1e6).toFixed(1).padStart(6) + 'M'
+    const vol = m.volume24h != null ? (m.volume24h / 1e6).toFixed(1).padStart(7) + 'M' : '    N/A'
     lines.push(
-      `${m.asset.padEnd(10)} | ${fmt(m.hlRate8h)} | ${fmt(m.binanceRate8h)} | ${fmt(m.bybitRate8h)} | ${fmt(m.okxRate8h)} | ${fmt(m.maxSpread)} | ${oi}`
+      `${m.asset.padEnd(10)} | ${price} | ${chg} | ${fmtRate(m.hlRate8h)} | ${fmtRate(m.maxSpread)} | ${oi} | ${vol}`
     )
   }
   return lines.join('\n')
@@ -235,14 +244,17 @@ export async function runAiTraderCycle(traderName: string): Promise<Decision> {
 
 Your personality: ${t.persona}
 
+YOUR EDGE — You combine TWO signals that mechanical strategies cannot:
+1. FUNDING RATE SIGNAL: HL rate positive = longs overpaying = short bias. HL rate deeply negative = shorts overpaying = long bias. Cross-exchange spread amplifies conviction (HL positive while CEX negative = very strong short signal).
+2. PRICE/MOMENTUM SIGNAL: 24h price change and volume tell you whether the crowd is with you or against you. A positive HL rate on an asset DOWN 10% today = strong short (momentum confirms arb). A positive HL rate on an asset UP 20% today = risky (momentum fights you, funding may flip).
+
+ONLY TRADE when BOTH signals agree or one signal is extreme. Skip trades where signals conflict unless the funding spread is massive (>0.05%/8h).
+
 Rules:
-- You trade perpetual futures on Hyperliquid using funding rate arbitrage
 - Max 3 open positions at once
-- Max 30% of portfolio per position
-- PRIMARY STRATEGY: funding arb — short when HL rate is POSITIVE (you collect funding payments), long when HL rate is deeply NEGATIVE (longs collect)
-- CROSS-EXCHANGE SIGNAL: if HL rate is positive but CEX rates are deeply negative, it means HL longs are overpaying — strong short signal
-- POSITION SIZING: use the spread size to size your conviction. 0.01%+ spread = worth trading
-- Always explain your reasoning clearly
+- Max 30% of portfolio per position  
+- Size up when signals strongly agree, size down when only one signal present
+- Always reference BOTH price action AND funding rate in your reasoning
 
 Your portfolio:
 - Cash: $${cashBalance.toFixed(2)}
@@ -253,16 +265,20 @@ ${positionsStr}
   const userMessage = `Current market data (top 20 assets by open interest on Hyperliquid):
 ${marketTable}
 
-What do you want to do? You must respond with a JSON decision:
+Analyze both the funding rates AND the 24h price action. Look for assets where:
+- Funding signal and price momentum AGREE (best trades)
+- Or funding spread is so large (>0.05%/8h) it dominates regardless
+
+Respond with a single JSON decision:
 {
   "action": "open_long" | "open_short" | "close" | "hold",
-  "asset": "BTC",
-  "size_usd": 2000,
-  "reasoning": "Your explanation here (2-4 sentences max)"
+  "asset": "MEME",
+  "size_usd": 2500,
+  "reasoning": "Reference both price change AND funding rate. 2-4 sentences max."
 }
 
-If you want to close a position, set action="close" and specify the asset.
-If you want to do nothing, set action="hold" with reasoning.
+If closing a position, set action="close" with the asset.
+If no good setup, set action="hold" and explain why nothing is compelling right now.
 Only one action per turn.`
 
   const decision = await callLLM(t, systemPrompt, userMessage)

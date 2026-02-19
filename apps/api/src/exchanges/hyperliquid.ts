@@ -16,6 +16,11 @@ export async function fetchHyperliquid(): Promise<FundingRate[]> {
     const rates: FundingRate[] = meta.universe.map((asset, i) => {
       const ctx = assetCtxs[i]
       const rateRaw = parseFloat(ctx.funding)
+      const markPrice = ctx.markPx ? parseFloat(ctx.markPx) : undefined
+      const prevDayPrice = ctx.prevDayPx ? parseFloat(ctx.prevDayPx) : undefined
+      const change24h = (markPrice && prevDayPrice && prevDayPrice !== 0)
+        ? ((markPrice - prevDayPrice) / prevDayPrice) * 100
+        : undefined
       return {
         asset: asset.name,
         exchange: 'hyperliquid' as const,
@@ -23,6 +28,10 @@ export async function fetchHyperliquid(): Promise<FundingRate[]> {
         rate8h: rateRaw * 8, // hourly → 8h equivalent
         nextFundingTime: ctx.nextFundingTime ? Number(ctx.nextFundingTime) : now + 3600000,
         openInterest: parseFloat(ctx.openInterest) || undefined,
+        markPrice,
+        prevDayPrice,
+        change24h,
+        volume24h: ctx.dayNtlVlm ? parseFloat(ctx.dayNtlVlm) : undefined,
         timestamp: now,
       }
     })

@@ -5,6 +5,10 @@ export interface FundingRate {
   rateRaw: number         // raw rate as returned by exchange
   nextFundingTime: number // unix ms
   openInterest?: number
+  markPrice?: number      // current mark price (HL only)
+  prevDayPrice?: number   // 24h ago price (HL only)
+  change24h?: number      // % price change over 24h (HL only)
+  volume24h?: number      // 24h notional volume USD (HL only)
   timestamp: number       // when we fetched this
 }
 
