@@ -209,24 +209,31 @@ async function processPortfolio(
       const allowedAssets = config.allowed_assets ?? ['BTC', 'ETH']
       const entrySpread = config.entry_spread_threshold ?? 0.05
       candidates = allSpreads.filter(s =>
-        allowedAssets.includes(s.asset) && s.maxSpread > entrySpread && !openAssets.has(s.asset)
+        allowedAssets.includes(s.asset) &&
+        s.maxSpread > entrySpread &&
+        (s.hl?.rate8h ?? 0) > 0 && // Only short when HL rate is positive (we collect)
+        !openAssets.has(s.asset)
       ).sort((a, b) => b.maxSpread - a.maxSpread)
     } else if (portfolio.strategy_name === 'diversified') {
       const topN = config.top_n_by_oi ?? 20
       const entrySpread = config.entry_spread_threshold ?? 0.04
-      // Filter by top OI
       const withOI = allSpreads
         .filter(s => s.hl?.openInterest)
         .sort((a, b) => (b.hl?.openInterest ?? 0) - (a.hl?.openInterest ?? 0))
         .slice(0, topN)
       candidates = withOI.filter(s =>
-        s.maxSpread > entrySpread && !openAssets.has(s.asset)
+        s.maxSpread > entrySpread &&
+        (s.hl?.rate8h ?? 0) > 0 && // Only short when HL rate is positive (we collect)
+        !openAssets.has(s.asset)
       ).sort((a, b) => b.maxSpread - a.maxSpread)
     } else {
-      // aggressive
+      // aggressive: only enter short_perp when HL rate is positive (collecting funding)
+      // negative rates = paying funding = wrong direction for this strategy
       const entrySpread = config.entry_spread_threshold ?? 0.03
       candidates = allSpreads.filter(s =>
-        s.maxSpread > entrySpread && !openAssets.has(s.asset)
+        s.maxSpread > entrySpread &&
+        (s.hl?.rate8h ?? 0) > 0 && // Must be positive to collect as short
+        !openAssets.has(s.asset)
       ).sort((a, b) => b.maxSpread - a.maxSpread)
     }
 
