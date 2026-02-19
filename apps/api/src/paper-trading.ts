@@ -86,7 +86,7 @@ async function processPortfolio(
     .from('paper_positions')
     .select('*')
     .eq('portfolio_id', portfolio.id)
-    .is('closed_at', null)
+    .eq('is_open', true)
 
   if (posErr) {
     console.error(`[Paper] Load positions error for '${portfolio.strategy_name}':`, posErr.message)
@@ -166,7 +166,7 @@ async function processPortfolio(
       const fee = pos.size_usd * TRADING_FEE
       cashBalance += pos.size_usd - fee
 
-      await db.from('paper_positions').update({ closed_at: now.toISOString() }).eq('id', pos.id)
+      await db.from('paper_positions').update({ is_open: false }).eq('id', pos.id)
 
       await db.from('paper_transactions').insert([
         {
