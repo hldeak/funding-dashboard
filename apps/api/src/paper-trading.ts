@@ -201,13 +201,13 @@ async function processPortfolio(
 
     if (portfolio.strategy_name === 'negative_fade') {
       // Long when HL rate is deeply negative
-      const entryThreshold = config.entry_rate_threshold ?? -0.05
+      const entryThreshold = config.enter_rate_threshold ?? config.entry_rate_threshold ?? -0.05
       candidates = allSpreads.filter(s =>
         s.hl && s.hl.rate8h < entryThreshold && !openAssets.has(s.asset)
       ).sort((a, b) => (a.hl?.rate8h ?? 0) - (b.hl?.rate8h ?? 0))
     } else if (portfolio.strategy_name === 'conservative') {
       const allowedAssets = config.allowed_assets ?? ['BTC', 'ETH']
-      const entrySpread = config.entry_spread_threshold ?? 0.05
+      const entrySpread = config.enter_spread_threshold ?? config.entry_spread_threshold ?? 0.05
       candidates = allSpreads.filter(s =>
         allowedAssets.includes(s.asset) &&
         s.maxSpread > entrySpread &&
@@ -216,7 +216,7 @@ async function processPortfolio(
       ).sort((a, b) => b.maxSpread - a.maxSpread)
     } else if (portfolio.strategy_name === 'diversified') {
       const topN = config.top_n_by_oi ?? 20
-      const entrySpread = config.entry_spread_threshold ?? 0.04
+      const entrySpread = config.enter_spread_threshold ?? config.entry_spread_threshold ?? 0.04
       const withOI = allSpreads
         .filter(s => s.hl?.openInterest)
         .sort((a, b) => (b.hl?.openInterest ?? 0) - (a.hl?.openInterest ?? 0))
@@ -229,7 +229,7 @@ async function processPortfolio(
     } else {
       // aggressive: only enter short_perp when HL rate is positive (collecting funding)
       // negative rates = paying funding = wrong direction for this strategy
-      const entrySpread = config.entry_spread_threshold ?? 0.03
+      const entrySpread = config.enter_spread_threshold ?? config.entry_spread_threshold ?? 0.03
       candidates = allSpreads.filter(s =>
         s.maxSpread > entrySpread &&
         (s.hl?.rate8h ?? 0) > 0 && // Must be positive to collect as short
