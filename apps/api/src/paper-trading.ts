@@ -285,5 +285,13 @@ async function processPortfolio(
   }
 
   // Update portfolio cash balance
-  await db.from('paper_portfolios').update({ cash_balance: cashBalance }).eq('id', portfolio.id)
+  const { error: updateErr } = await db
+    .from('paper_portfolios')
+    .update({ cash_balance: cashBalance, updated_at: new Date().toISOString() })
+    .eq('id', portfolio.id)
+  if (updateErr) {
+    console.error(`[Paper] Failed to update cash balance for '${portfolio.strategy_name}':`, updateErr.message)
+  } else {
+    console.log(`[Paper] '${portfolio.strategy_name}' cash balance updated: $${cashBalance.toFixed(2)}`)
+  }
 }
