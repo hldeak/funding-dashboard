@@ -164,6 +164,7 @@ async function processPortfolio(
 
     if (shouldExit) {
       const fee = pos.size_usd * TRADING_FEE
+      // Return position size minus exit fee
       cashBalance += pos.size_usd - fee
 
       await db.from('paper_positions').update({ is_open: false }).eq('id', pos.id)
@@ -174,22 +175,11 @@ async function processPortfolio(
           position_id: pos.id,
           type: 'close',
           asset: pos.asset,
-          amount: pos.size_usd,
-          description: `Closed ${pos.asset} position $${pos.size_usd.toFixed(0)}`,
-        },
-        {
-          portfolio_id: portfolio.id,
-          position_id: pos.id,
-          type: 'fee',
-          asset: pos.asset,
-          amount: -fee,
-          description: `Exit fee ${pos.asset}: $${fee.toFixed(2)}`,
+          amount: pos.size_usd - fee,
+          note: `Closed ${pos.asset} $${pos.size_usd.toFixed(0)}, fee: $${fee.toFixed(2)}`,
         },
       ])
 
-      cashBalance -= fee // fee already subtracted above via +size-fee, but we need the txn
-      // Actually: cashBalance += size_usd - fee covers it. The fee txn is just for logging.
-      // Correction: cashBalance already has the right value from += size_usd - fee
       positionsToRemove.push(pos.id)
 
       console.log(`[Paper] '${portfolio.strategy_name}': closed ${pos.asset} position $${pos.size_usd.toFixed(0)}, funding collected: $${pos.total_funding_collected.toFixed(2)}`)
