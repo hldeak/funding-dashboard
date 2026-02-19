@@ -58,7 +58,7 @@ app.get('/api/paper/portfolios', async (c) => {
   if (error) return c.json({ error: error.message }, 500)
 
   const results = await Promise.all((portfolios ?? []).map(async (p: any) => {
-    const { data: positions } = await db.from('paper_positions').select('size_usd').eq('portfolio_id', p.id).is('closed_at', null)
+    const { data: positions } = await db.from('paper_positions').select('size_usd').eq('portfolio_id', p.id).eq('is_open', true)
     const { data: fundingTxns } = await db.from('paper_transactions').select('amount').eq('portfolio_id', p.id).eq('type', 'funding')
 
     const positionValue = (positions ?? []).reduce((s: number, pos: any) => s + pos.size_usd, 0)
@@ -87,7 +87,7 @@ app.get('/api/paper/leaderboard', async (c) => {
 
   const { data: portfolios } = await db.from('paper_portfolios').select('*')
   const results = await Promise.all((portfolios ?? []).map(async (p: any) => {
-    const { data: positions } = await db.from('paper_positions').select('size_usd').eq('portfolio_id', p.id).is('closed_at', null)
+    const { data: positions } = await db.from('paper_positions').select('size_usd').eq('portfolio_id', p.id).eq('is_open', true)
     const positionValue = (positions ?? []).reduce((s: number, pos: any) => s + pos.size_usd, 0)
     const totalValue = p.cash_balance + positionValue
     const totalPnl = totalValue - p.initial_balance
@@ -115,7 +115,7 @@ app.get('/api/paper/portfolios/:id', async (c) => {
   const { data: portfolio, error } = await db.from('paper_portfolios').select('*').eq('id', id).single()
   if (error || !portfolio) return c.json({ error: 'Not found' }, 404)
 
-  const { data: positions } = await db.from('paper_positions').select('*').eq('portfolio_id', id).is('closed_at', null)
+  const { data: positions } = await db.from('paper_positions').select('*').eq('portfolio_id', id).eq('is_open', true)
   const { data: transactions } = await db.from('paper_transactions').select('*').eq('portfolio_id', id).order('created_at', { ascending: false }).limit(50)
   const { data: fundingTxns } = await db.from('paper_transactions').select('amount').eq('portfolio_id', id).eq('type', 'funding')
 
