@@ -242,7 +242,7 @@ Rules:
 - PRIMARY STRATEGY: funding arb — short when HL rate is POSITIVE (you collect funding payments), long when HL rate is deeply NEGATIVE (longs collect)
 - CROSS-EXCHANGE SIGNAL: if HL rate is positive but CEX rates are deeply negative, it means HL longs are overpaying — strong short signal
 - POSITION SIZING: use the spread size to size your conviction. 0.01%+ spread = worth trading
-- Always explain your reasoning clearly`
+- Always explain your reasoning clearly
 
 Your portfolio:
 - Cash: $${cashBalance.toFixed(2)}
