@@ -6,6 +6,7 @@ import { saveSnapshot } from './db'
 import { getHistory } from './db'
 import { runPaperTradingCycle } from './paper-trading'
 import { getPaperClient } from './paper-routes'
+import { runAiTraderCycle } from './ai-trading'
 
 const app = new Hono()
 
@@ -148,6 +149,88 @@ app.get('/api/paper/portfolios/:id', async (c) => {
     positions: enrichedPositions,
     recent_transactions: transactions ?? [],
   })
+})
+
+// AI Traders routes
+app.get('/api/ai/traders', async (c) => {
+  const db = await getPaperClient()
+  if (!db) return c.json({ error: 'DB not configured' }, 500)
+
+  const { data: traders, error } = await db.from('ai_traders').select('*').order('name')
+  if (error) return c.json({ error: error.message }, 500)
+
+  const results = await Promise.all((traders ?? []).map(async (t: any) => {
+    const { data: positions } = await db.from('ai_positions').select('*').eq('trader_id', t.id).eq('is_open', true)
+    const { data: allPositions } = await db.from('ai_positions').select('funding_collected').eq('trader_id', t.id)
+    const { data: decisions } = await db.from('ai_decisions').select('action, reasoning, asset, created_at').eq('trader_id', t.id).order('created_at', { ascending: false }).limit(1)
+
+    const positionValue = (positions ?? []).reduce((s: number, p: any) => s + p.size_usd, 0)
+    const totalFunding = (allPositions ?? []).reduce((s: number, p: any) => s + (p.funding_collected ?? 0), 0)
+    const totalValue = t.cash_balance + positionValue
+    const totalPnl = totalValue - 10000
+
+    return {
+      ...t,
+      total_value: totalValue,
+      total_pnl: totalPnl,
+      pnl_pct: totalPnl / 10000 * 100,
+      open_positions_count: (positions ?? []).length,
+      total_funding_collected: totalFunding,
+      last_decision: decisions?.[0] ?? null,
+    }
+  }))
+
+  results.sort((a, b) => b.pnl_pct - a.pnl_pct)
+  return c.json(results)
+})
+
+app.get('/api/ai/traders/:name', async (c) => {
+  const db = await getPaperClient()
+  if (!db) return c.json({ error: 'DB not configured' }, 500)
+
+  const name = c.req.param('name')
+  const { data: trader, error } = await db.from('ai_traders').select('*').eq('name', name).single()
+  if (error || !trader) return c.json({ error: 'Not found' }, 404)
+
+  const t = trader as any
+  const { data: positions } = await db.from('ai_positions').select('*').eq('trader_id', t.id).eq('is_open', true)
+  const { data: allPositions } = await db.from('ai_positions').select('funding_collected').eq('trader_id', t.id)
+  const { data: decisions } = await db.from('ai_decisions').select('*').eq('trader_id', t.id).order('created_at', { ascending: false }).limit(20)
+
+  const positionValue = (positions ?? []).reduce((s: number, p: any) => s + p.size_usd, 0)
+  const totalFunding = (allPositions ?? []).reduce((s: number, p: any) => s + (p.funding_collected ?? 0), 0)
+  const totalValue = t.cash_balance + positionValue
+  const totalPnl = totalValue - 10000
+
+  // Enrich positions with current rates
+  const cachedResult = await getCachedRates()
+  const spreadsMap = new Map(cachedResult.spreads.map(s => [s.asset, s]))
+  const enrichedPositions = (positions ?? []).map((p: any) => {
+    const spread = spreadsMap.get(p.asset)
+    return { ...p, current_rate_8h: spread?.hl?.rate8h ?? null }
+  })
+
+  return c.json({
+    ...t,
+    total_value: totalValue,
+    total_pnl: totalPnl,
+    pnl_pct: totalPnl / 10000 * 100,
+    open_positions_count: enrichedPositions.length,
+    total_funding_collected: totalFunding,
+    last_decision: decisions?.[0] ?? null,
+    positions: enrichedPositions,
+    recent_decisions: decisions ?? [],
+  })
+})
+
+app.post('/api/ai/run/:name', async (c) => {
+  const name = c.req.param('name')
+  try {
+    const decision = await runAiTraderCycle(name)
+    return c.json({ ok: true, ...decision })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
 })
 
 // Background polling — fetch every 30 seconds

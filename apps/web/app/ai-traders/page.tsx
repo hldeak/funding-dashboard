@@ -1,0 +1,226 @@
+'use client'
+
+import { useEffect, useState, useCallback } from 'react'
+import Link from 'next/link'
+
+interface AiTrader {
+  id: string
+  name: string
+  model: string
+  emoji: string
+  persona: string
+  cash_balance: number
+  total_value: number
+  total_pnl: number
+  pnl_pct: number
+  open_positions_count: number
+  total_funding_collected: number
+  last_decision: { action: string; reasoning: string; asset?: string; created_at: string } | null
+}
+
+interface TraderDetail extends AiTrader {
+  positions: any[]
+  recent_decisions: { action: string; reasoning: string; asset?: string; size_usd?: number; created_at: string }[]
+}
+
+function ActionBadge({ action }: { action: string }) {
+  const colors: Record<string, string> = {
+    open_long: 'bg-green-600 text-green-100',
+    open_short: 'bg-red-600 text-red-100',
+    close: 'bg-yellow-600 text-yellow-100',
+    hold: 'bg-gray-600 text-gray-300',
+  }
+  const labels: Record<string, string> = {
+    open_long: 'BUY',
+    open_short: 'SELL',
+    close: 'CLOSE',
+    hold: 'HOLD',
+  }
+  return (
+    <span className={`px-2 py-0.5 rounded text-xs font-mono font-bold ${colors[action] ?? 'bg-gray-700 text-gray-400'}`}>
+      {labels[action] ?? action.toUpperCase()}
+    </span>
+  )
+}
+
+function timeAgo(dateStr: string) {
+  const diff = Date.now() - new Date(dateStr).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+export default function AiTradersPage() {
+  const [traders, setTraders] = useState<AiTrader[]>([])
+  const [selected, setSelected] = useState<TraderDetail | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const fetchTraders = useCallback(async () => {
+    try {
+      const res = await fetch('/api/ai/traders')
+      const data = await res.json()
+      if (Array.isArray(data)) setTraders(data)
+    } catch {}
+    setLoading(false)
+  }, [])
+
+  const fetchDetail = async (name: string) => {
+    try {
+      const res = await fetch(`/api/ai/traders/${name}`)
+      const data = await res.json()
+      if (data.id) setSelected(data)
+    } catch {}
+  }
+
+  useEffect(() => {
+    fetchTraders()
+    const interval = setInterval(fetchTraders, 60000)
+    return () => clearInterval(interval)
+  }, [fetchTraders])
+
+  return (
+    <main className="max-w-5xl mx-auto px-4 py-8">
+      <div className="mb-8">
+        <Link href="/" className="text-blue-400 hover:text-blue-300 text-sm">← Back to Dashboard</Link>
+      </div>
+      <h1 className="text-3xl font-bold text-white mb-1">🤖 AI Traders</h1>
+      <p className="text-gray-400 mb-8">Four AI models competing with $10K each</p>
+
+      {loading ? (
+        <div className="text-gray-500 text-center py-12">Loading...</div>
+      ) : traders.length === 0 ? (
+        <div className="text-gray-500 text-center py-12">No traders found</div>
+      ) : (
+        <div className="space-y-4">
+          {traders.map((t, i) => (
+            <div key={t.id} className="bg-gray-900 border border-gray-800 rounded-lg p-5 hover:border-gray-700 transition-colors">
+              <div className="flex items-start justify-between">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-3 mb-2">
+                    <span className="text-2xl">{t.emoji}</span>
+                    <div>
+                      <span className="text-white font-bold text-lg">{t.name}</span>
+                      <span className="text-gray-500 text-sm ml-2">{t.model}</span>
+                    </div>
+                    <span className="text-gray-600 text-sm font-mono">#{i + 1}</span>
+                  </div>
+                  <div className="flex gap-6 text-sm mb-3">
+                    <div>
+                      <span className="text-gray-500">Balance: </span>
+                      <span className="text-white font-mono">${t.total_value.toFixed(2)}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">P&L: </span>
+                      <span className={`font-mono font-bold ${t.total_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {t.total_pnl >= 0 ? '+' : ''}{t.total_pnl.toFixed(2)} ({t.pnl_pct >= 0 ? '+' : ''}{t.pnl_pct.toFixed(2)}%)
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Positions: </span>
+                      <span className="text-white font-mono">{t.open_positions_count}/3</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Funding: </span>
+                      <span className={`font-mono ${t.total_funding_collected >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        ${t.total_funding_collected.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                  {t.last_decision && (
+                    <div className="flex items-start gap-2">
+                      <ActionBadge action={t.last_decision.action} />
+                      {t.last_decision.asset && <span className="text-gray-400 text-sm font-mono">{t.last_decision.asset}</span>}
+                      <span className="text-gray-500 text-sm line-clamp-2">{t.last_decision.reasoning}</span>
+                      <span className="text-gray-600 text-xs whitespace-nowrap">{timeAgo(t.last_decision.created_at)}</span>
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={() => fetchDetail(t.name)}
+                  className="ml-4 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-sm border border-gray-700 whitespace-nowrap"
+                >
+                  View Details
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Detail Modal */}
+      {selected && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={() => setSelected(null)}>
+          <div className="bg-gray-900 border border-gray-700 rounded-lg max-w-3xl w-full max-h-[85vh] overflow-y-auto p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-bold text-white">{selected.emoji} {selected.name}</h2>
+              <button onClick={() => setSelected(null)} className="text-gray-500 hover:text-white text-xl">✕</button>
+            </div>
+            <p className="text-gray-500 text-sm mb-4">{selected.model} — {selected.persona}</p>
+
+            <div className="grid grid-cols-3 gap-4 mb-6">
+              <div className="bg-gray-800 rounded p-3">
+                <div className="text-gray-500 text-xs">Total Value</div>
+                <div className="text-white font-mono text-lg">${selected.total_value.toFixed(2)}</div>
+              </div>
+              <div className="bg-gray-800 rounded p-3">
+                <div className="text-gray-500 text-xs">P&L</div>
+                <div className={`font-mono text-lg ${selected.total_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {selected.total_pnl >= 0 ? '+' : ''}${selected.total_pnl.toFixed(2)}
+                </div>
+              </div>
+              <div className="bg-gray-800 rounded p-3">
+                <div className="text-gray-500 text-xs">Funding Collected</div>
+                <div className="text-green-400 font-mono text-lg">${selected.total_funding_collected.toFixed(2)}</div>
+              </div>
+            </div>
+
+            {/* Open Positions */}
+            {selected.positions?.length > 0 && (
+              <div className="mb-6">
+                <h3 className="text-white font-bold mb-2">Open Positions</h3>
+                <div className="space-y-2">
+                  {selected.positions.map((p: any) => (
+                    <div key={p.id} className="bg-gray-800 rounded p-3 flex justify-between items-center text-sm">
+                      <div>
+                        <span className={`font-bold ${p.side === 'long' ? 'text-green-400' : 'text-red-400'}`}>
+                          {p.side.toUpperCase()}
+                        </span>
+                        <span className="text-white ml-2 font-mono">{p.asset}</span>
+                        <span className="text-gray-500 ml-2">${p.size_usd.toFixed(0)}</span>
+                      </div>
+                      <div className="text-gray-400 font-mono">
+                        Funding: ${p.funding_collected?.toFixed(2) ?? '0.00'}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Decision History */}
+            <h3 className="text-white font-bold mb-2">Recent Decisions</h3>
+            <div className="space-y-2">
+              {(selected.recent_decisions ?? []).map((d, i) => (
+                <div key={i} className="bg-gray-800 rounded p-3 text-sm">
+                  <div className="flex items-center gap-2 mb-1">
+                    <ActionBadge action={d.action} />
+                    {d.asset && <span className="text-gray-400 font-mono">{d.asset}</span>}
+                    {d.size_usd && <span className="text-gray-500">${d.size_usd.toFixed(0)}</span>}
+                    <span className="text-gray-600 text-xs ml-auto">{timeAgo(d.created_at)}</span>
+                  </div>
+                  <p className="text-gray-400">{d.reasoning}</p>
+                </div>
+              ))}
+              {(selected.recent_decisions ?? []).length === 0 && (
+                <p className="text-gray-600 text-sm">No decisions yet</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </main>
+  )
+}
