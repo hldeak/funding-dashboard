@@ -182,22 +182,36 @@ export default function AiTradersPage() {
             {/* Open Positions */}
             {selected.positions?.length > 0 && (
               <div className="mb-6">
-                <h3 className="text-white font-bold mb-2">Open Positions</h3>
-                <div className="space-y-2">
-                  {selected.positions.map((p: any) => (
-                    <div key={p.id} className="bg-gray-800 rounded p-3 flex justify-between items-center text-sm">
-                      <div>
-                        <span className={`font-bold ${p.direction === 'long' ? 'text-green-400' : 'text-red-400'}`}>
-                          {(p.direction ?? p.side ?? "?").toUpperCase()}
-                        </span>
-                        <span className="text-white ml-2 font-mono">{p.asset}</span>
-                        <span className="text-gray-500 ml-2">${p.size_usd.toFixed(0)}</span>
+                <h3 className="text-white font-bold mb-2">Open Positions <span className="text-gray-500 text-xs font-normal">(mark-to-market)</span></h3>
+                <div className="space-y-3">
+                  {selected.positions.map((p: any) => {
+                    const unrealized = p.unrealized_pnl ?? 0
+                    const entryPrice = p.entry_price_approx
+                    const currentPrice = p.current_price
+                    const fmtPrice = (v: number | null) => v == null ? 'N/A' : v < 1 ? `$${v.toFixed(5)}` : `$${v.toFixed(2)}`
+                    return (
+                      <div key={p.id} className="bg-gray-800 rounded p-3 text-sm">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className={`font-bold px-2 py-0.5 rounded text-xs ${p.direction === 'long' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
+                              {(p.direction ?? '?').toUpperCase()}
+                            </span>
+                            <span className="text-white font-mono font-bold">{p.asset}</span>
+                            <span className="text-gray-400">${p.size_usd.toFixed(0)}</span>
+                          </div>
+                          <span className={`font-mono font-bold ${unrealized >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {unrealized >= 0 ? '+' : ''}${unrealized.toFixed(2)} unrealized
+                          </span>
+                        </div>
+                        <div className="flex gap-4 text-xs text-gray-400 font-mono">
+                          <span>Entry: <span className="text-gray-300">{fmtPrice(entryPrice)}</span></span>
+                          <span>→</span>
+                          <span>Now: <span className="text-gray-300">{fmtPrice(currentPrice)}</span></span>
+                          <span className="ml-auto">Funding: <span className={`${(p.funding_collected ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>${(p.funding_collected ?? 0).toFixed(2)}</span></span>
+                        </div>
                       </div>
-                      <div className="text-gray-400 font-mono">
-                        Funding: ${p.funding_collected?.toFixed(2) ?? '0.00'}
-                      </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
             )}

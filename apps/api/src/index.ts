@@ -151,6 +151,16 @@ app.get('/api/paper/portfolios/:id', async (c) => {
   })
 })
 
+/** Compute unrealized P&L for a position given current mark price */
+function computeAiUnrealizedPnl(pos: any, currentPrice: number | null): number {
+  if (!currentPrice || !pos.entry_price_approx) return 0
+  if (pos.direction === 'long') {
+    return (currentPrice - pos.entry_price_approx) / pos.entry_price_approx * pos.size_usd
+  } else {
+    return (pos.entry_price_approx - currentPrice) / pos.entry_price_approx * pos.size_usd
+  }
+}
+
 // AI Traders routes
 app.get('/api/ai/traders', async (c) => {
   const db = await getPaperClient()
@@ -159,14 +169,24 @@ app.get('/api/ai/traders', async (c) => {
   const { data: traders, error } = await db.from('ai_traders').select('*').order('name')
   if (error) return c.json({ error: error.message }, 500)
 
+  const cachedResult = await getCachedRates()
+  const spreadsMap = new Map(cachedResult.spreads.map((s: any) => [s.asset, s]))
+
   const results = await Promise.all((traders ?? []).map(async (t: any) => {
     const { data: positions } = await db.from('ai_positions').select('*').eq('trader_id', t.id).eq('is_open', true)
     const { data: allPositions } = await db.from('ai_positions').select('funding_collected').eq('trader_id', t.id)
     const { data: decisions } = await db.from('ai_decisions').select('action, reasoning, asset, created_at').eq('trader_id', t.id).order('created_at', { ascending: false }).limit(1)
 
-    const positionValue = (positions ?? []).reduce((s: number, p: any) => s + p.size_usd, 0)
+    // Mark-to-market: size_usd + unrealized_pnl + funding_collected per position
+    const totalPositionValue = (positions ?? []).reduce((s: number, p: any) => {
+      const spread = spreadsMap.get(p.asset) as any
+      const currentPrice = spread?.hl?.markPrice ?? null
+      const unrealizedPnl = computeAiUnrealizedPnl(p, currentPrice)
+      return s + p.size_usd + unrealizedPnl + (p.funding_collected ?? 0)
+    }, 0)
+
     const totalFunding = (allPositions ?? []).reduce((s: number, p: any) => s + (p.funding_collected ?? 0), 0)
-    const totalValue = t.cash_balance + positionValue
+    const totalValue = t.cash_balance + totalPositionValue
     const totalPnl = totalValue - 10000
 
     return {
@@ -197,18 +217,30 @@ app.get('/api/ai/traders/:name', async (c) => {
   const { data: allPositions } = await db.from('ai_positions').select('funding_collected').eq('trader_id', t.id)
   const { data: decisions } = await db.from('ai_decisions').select('*').eq('trader_id', t.id).order('created_at', { ascending: false }).limit(20)
 
-  const positionValue = (positions ?? []).reduce((s: number, p: any) => s + p.size_usd, 0)
   const totalFunding = (allPositions ?? []).reduce((s: number, p: any) => s + (p.funding_collected ?? 0), 0)
-  const totalValue = t.cash_balance + positionValue
-  const totalPnl = totalValue - 10000
 
-  // Enrich positions with current rates
+  // Enrich positions with current price and mark-to-market unrealized P&L
   const cachedResult = await getCachedRates()
-  const spreadsMap = new Map(cachedResult.spreads.map(s => [s.asset, s]))
+  const spreadsMap = new Map(cachedResult.spreads.map((s: any) => [s.asset, s]))
   const enrichedPositions = (positions ?? []).map((p: any) => {
-    const spread = spreadsMap.get(p.asset)
-    return { ...p, current_rate_8h: spread?.hl?.rate8h ?? null }
+    const spread = spreadsMap.get(p.asset) as any
+    const currentPrice = spread?.hl?.markPrice ?? null
+    const unrealizedPnl = computeAiUnrealizedPnl(p, currentPrice)
+    return {
+      ...p,
+      current_price: currentPrice,
+      unrealized_pnl: unrealizedPnl,
+      current_rate_8h: spread?.hl?.rate8h ?? null,
+    }
   })
+
+  // Mark-to-market total value
+  const totalPositionValue = enrichedPositions.reduce((s: number, p: any) => {
+    return s + p.size_usd + (p.unrealized_pnl ?? 0) + (p.funding_collected ?? 0)
+  }, 0)
+
+  const totalValue = t.cash_balance + totalPositionValue
+  const totalPnl = totalValue - 10000
 
   return c.json({
     ...t,
