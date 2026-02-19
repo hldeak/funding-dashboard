@@ -50,6 +50,17 @@ app.get('/api/funding', async (c) => {
   return c.json(result.spreads.slice(0, limit))
 })
 
+/** Compute unrealized P&L for a paper position given current mark price */
+function computePaperUnrealizedPnl(pos: any, currentPrice: number | null): number {
+  if (!currentPrice || !pos.entry_price) return 0
+  if (pos.side === 'long_perp') {
+    return (currentPrice - pos.entry_price) / pos.entry_price * pos.size_usd
+  } else {
+    // short_perp
+    return (pos.entry_price - currentPrice) / pos.entry_price * pos.size_usd
+  }
+}
+
 // Paper trading routes
 app.get('/api/paper/portfolios', async (c) => {
   const db = await getPaperClient()
@@ -58,11 +69,21 @@ app.get('/api/paper/portfolios', async (c) => {
   const { data: portfolios, error } = await db.from('paper_portfolios').select('*')
   if (error) return c.json({ error: error.message }, 500)
 
+  const cachedResult = await getCachedRates()
+  const spreadsMap = new Map(cachedResult.spreads.map((s: any) => [s.asset, s]))
+
   const results = await Promise.all((portfolios ?? []).map(async (p: any) => {
-    const { data: positions } = await db.from('paper_positions').select('size_usd').eq('portfolio_id', p.id).eq('is_open', true)
+    const { data: positions } = await db.from('paper_positions').select('*').eq('portfolio_id', p.id).eq('is_open', true)
     const { data: fundingTxns } = await db.from('paper_transactions').select('amount').eq('portfolio_id', p.id).eq('type', 'funding')
 
-    const positionValue = (positions ?? []).reduce((s: number, pos: any) => s + pos.size_usd, 0)
+    // Mark-to-market: size_usd + unrealized_pnl + total_funding_collected per position
+    const positionValue = (positions ?? []).reduce((s: number, pos: any) => {
+      const spread = spreadsMap.get(pos.asset) as any
+      const currentPrice = spread?.hl?.markPrice ?? null
+      const unrealizedPnl = computePaperUnrealizedPnl(pos, currentPrice)
+      return s + pos.size_usd + unrealizedPnl + (pos.total_funding_collected ?? 0)
+    }, 0)
+
     const totalFunding = (fundingTxns ?? []).reduce((s: number, t: any) => s + t.amount, 0)
     const totalValue = p.cash_balance + positionValue
     const totalPnl = totalValue - p.initial_balance
@@ -76,6 +97,7 @@ app.get('/api/paper/portfolios', async (c) => {
       open_positions_count: (positions ?? []).length,
       total_funding_collected: totalFunding,
       days_running: daysRunning,
+      mark_to_market: true,
     }
   }))
 
@@ -87,9 +109,18 @@ app.get('/api/paper/leaderboard', async (c) => {
   if (!db) return c.json({ error: 'DB not configured' }, 500)
 
   const { data: portfolios } = await db.from('paper_portfolios').select('*')
+  const cachedResult = await getCachedRates()
+  const spreadsMap = new Map(cachedResult.spreads.map((s: any) => [s.asset, s]))
+
   const results = await Promise.all((portfolios ?? []).map(async (p: any) => {
-    const { data: positions } = await db.from('paper_positions').select('size_usd').eq('portfolio_id', p.id).eq('is_open', true)
-    const positionValue = (positions ?? []).reduce((s: number, pos: any) => s + pos.size_usd, 0)
+    const { data: positions } = await db.from('paper_positions').select('*').eq('portfolio_id', p.id).eq('is_open', true)
+    // Mark-to-market position value
+    const positionValue = (positions ?? []).reduce((s: number, pos: any) => {
+      const spread = spreadsMap.get(pos.asset) as any
+      const currentPrice = spread?.hl?.markPrice ?? null
+      const unrealizedPnl = computePaperUnrealizedPnl(pos, currentPrice)
+      return s + pos.size_usd + unrealizedPnl + (pos.total_funding_collected ?? 0)
+    }, 0)
     const totalValue = p.cash_balance + positionValue
     const totalPnl = totalValue - p.initial_balance
     return {
@@ -101,6 +132,7 @@ app.get('/api/paper/leaderboard', async (c) => {
       pnl_pct: (totalPnl / p.initial_balance) * 100,
       open_positions_count: (positions ?? []).length,
       days_running: Math.max(1, Math.floor((Date.now() - new Date(p.created_at).getTime()) / 86400000)),
+      mark_to_market: true,
     }
   }))
 
@@ -124,15 +156,23 @@ app.get('/api/paper/portfolios/:id', async (c) => {
   const spreadsMap = new Map(cachedResult.spreads.map(s => [s.asset, s]))
 
   const enrichedPositions = (positions ?? []).map((pos: any) => {
-    const spread = spreadsMap.get(pos.asset)
+    const spread = spreadsMap.get(pos.asset) as any
+    const currentPrice: number | null = spread?.hl?.markPrice ?? null
+    const unrealizedPnl = computePaperUnrealizedPnl(pos, currentPrice)
+    const unrealizedPnlPct = pos.size_usd > 0 ? (unrealizedPnl / pos.size_usd) * 100 : 0
     return {
       ...pos,
+      current_price: currentPrice,
       current_rate_8h: spread?.hl?.rate8h ?? null,
       current_spread: spread?.maxSpread ?? null,
+      unrealized_pnl: unrealizedPnl,
+      unrealized_pnl_pct: unrealizedPnlPct,
+      total_position_value: pos.size_usd + unrealizedPnl + (pos.total_funding_collected ?? 0),
     }
   })
 
-  const positionValue = (positions ?? []).reduce((s: number, p: any) => s + p.size_usd, 0)
+  // Mark-to-market: sum(size_usd + unrealized_pnl + total_funding_collected) per position
+  const positionValue = enrichedPositions.reduce((s: number, pos: any) => s + pos.total_position_value, 0)
   const totalFunding = (fundingTxns ?? []).reduce((s: number, t: any) => s + t.amount, 0)
   const totalValue = (portfolio as any).cash_balance + positionValue
   const totalPnl = totalValue - (portfolio as any).initial_balance
@@ -146,6 +186,7 @@ app.get('/api/paper/portfolios/:id', async (c) => {
     open_positions_count: enrichedPositions.length,
     total_funding_collected: totalFunding,
     days_running: Math.max(1, Math.floor((Date.now() - new Date(p.created_at).getTime()) / 86400000)),
+    mark_to_market: true,
     positions: enrichedPositions,
     recent_transactions: transactions ?? [],
   })

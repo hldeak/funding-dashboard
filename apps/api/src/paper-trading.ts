@@ -250,6 +250,12 @@ async function processPortfolio(
       const side = portfolio.strategy_name === 'negative_fade' ? 'long_perp' : 'short_perp'
       const hlRate = candidate.hl?.rate8h ?? 0
 
+      // Don't enter a position we already have open in this asset
+      const existingPosition = remainingPositions.find(p => p.asset === candidate.asset)
+      if (existingPosition) continue
+
+      const entryPrice = candidate.hl?.markPrice ?? null
+
       const { error: insertErr } = await db.from('paper_positions').insert({
         portfolio_id: portfolio.id,
         asset: candidate.asset,
@@ -257,6 +263,7 @@ async function processPortfolio(
         size_usd: positionSize,
         entry_rate_8h: hlRate,
         entry_spread: candidate.maxSpread,
+        entry_price: entryPrice,
         total_funding_collected: 0,
         last_funding_collected: now.toISOString(),
         opened_at: now.toISOString(),

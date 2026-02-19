@@ -30,10 +30,15 @@ interface Position {
   asset: string
   side: string
   size_usd: number
+  entry_price: number | null
   entry_rate_8h: number
   total_funding_collected: number
+  current_price: number | null
   current_rate_8h: number | null
   current_spread: number | null
+  unrealized_pnl: number
+  unrealized_pnl_pct: number
+  total_position_value: number
   opened_at: string
 }
 
@@ -100,7 +105,10 @@ export default function PaperTradingPage() {
       {/* Leaderboard */}
       {sorted.length > 0 && (
         <div className="mb-6 p-4 bg-gray-800 rounded-lg border border-gray-700">
-          <h2 className="text-sm text-gray-400 mb-1">🏆 Leading Strategy</h2>
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="text-sm text-gray-400">🏆 Leading Strategy</h2>
+            <span className="text-xs text-blue-400 font-medium">📡 Mark-to-market</span>
+          </div>
           <p className="text-lg font-semibold text-white">
             {sorted[0].strategy_name.charAt(0).toUpperCase() + sorted[0].strategy_name.slice(1)}{' '}
             <span className={sorted[0].pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'}>
@@ -161,7 +169,10 @@ export default function PaperTradingPage() {
           {/* Open Positions */}
           {selected.positions.length > 0 ? (
             <div className="mb-6">
-              <h3 className="text-sm text-gray-400 mb-2">Open Positions</h3>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm text-gray-400">Open Positions</h3>
+                <span className="text-xs text-blue-400">📡 Mark-to-market</span>
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
@@ -169,9 +180,10 @@ export default function PaperTradingPage() {
                       <th className="text-left py-2">Asset</th>
                       <th className="text-left py-2">Side</th>
                       <th className="text-right py-2">Size</th>
-                      <th className="text-right py-2">Current Rate</th>
-                      <th className="text-right py-2">Spread</th>
+                      <th className="text-right py-2">Entry → Current</th>
+                      <th className="text-right py-2">Unrealized P&L</th>
                       <th className="text-right py-2">Funding</th>
+                      <th className="text-right py-2">Total Value</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -180,10 +192,20 @@ export default function PaperTradingPage() {
                         <td className="py-2 text-white font-medium">{pos.asset}</td>
                         <td className="py-2 text-gray-300">{pos.side === 'short_perp' ? '🔴 Short' : '🟢 Long'}</td>
                         <td className="py-2 text-right text-white">{formatUsd(pos.size_usd)}</td>
-                        <td className="py-2 text-right text-gray-300">{formatRate(pos.current_rate_8h)}</td>
-                        <td className="py-2 text-right text-gray-300">{formatRate(pos.current_spread)}</td>
-                        <td className={`py-2 text-right ${pos.total_funding_collected >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        <td className="py-2 text-right text-gray-400 tabular-nums">
+                          {pos.entry_price != null ? pos.entry_price.toFixed(4) : '—'}
+                          {' → '}
+                          {pos.current_price != null ? pos.current_price.toFixed(4) : '—'}
+                        </td>
+                        <td className={`py-2 text-right tabular-nums ${(pos.unrealized_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {formatUsd(pos.unrealized_pnl ?? 0)}
+                          <span className="text-xs ml-1 opacity-70">({formatPct(pos.unrealized_pnl_pct ?? 0)})</span>
+                        </td>
+                        <td className={`py-2 text-right tabular-nums ${pos.total_funding_collected >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                           {formatUsd(pos.total_funding_collected)}
+                        </td>
+                        <td className="py-2 text-right text-white tabular-nums">
+                          {formatUsd(pos.total_position_value ?? pos.size_usd)}
                         </td>
                       </tr>
                     ))}
@@ -222,7 +244,7 @@ export default function PaperTradingPage() {
       )}
 
       <div className="mt-8 text-center text-gray-600 text-xs">
-        Paper trading simulation · No real funds at risk · Auto-refreshes every 60s
+        Paper trading simulation · Mark-to-market P&L · No real funds at risk · Auto-refreshes every 60s
       </div>
     </main>
   )
