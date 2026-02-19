@@ -2,6 +2,9 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import Link from 'next/link'
+import dynamic from 'next/dynamic'
+
+const PerformanceChart = dynamic(() => import('../../components/PerformanceChart'), { ssr: false })
 
 interface AiTrader {
   id: string
@@ -21,6 +24,13 @@ interface AiTrader {
 interface TraderDetail extends AiTrader {
   positions: any[]
   recent_decisions: { action: string; reasoning: string; asset?: string; size_usd?: number; created_at: string }[]
+}
+
+interface SnapshotSeries {
+  id: string
+  name: string
+  color: string
+  data: { time: string; value: number; pnl_pct: number }[]
 }
 
 function ActionBadge({ action }: { action: string }) {
@@ -57,6 +67,8 @@ export default function AiTradersPage() {
   const [traders, setTraders] = useState<AiTrader[]>([])
   const [selected, setSelected] = useState<TraderDetail | null>(null)
   const [loading, setLoading] = useState(true)
+  const [chartSeries, setChartSeries] = useState<SnapshotSeries[]>([])
+  const [chartTab, setChartTab] = useState<'value' | 'pct'>('value')
 
   const API = 'https://hldesk-funding-api.fly.dev'
 
@@ -69,6 +81,16 @@ export default function AiTradersPage() {
     setLoading(false)
   }, [])
 
+  const fetchSnapshots = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/api/ai/snapshots?days=7`)
+      if (res.ok) {
+        const data = await res.json()
+        if (data.series) setChartSeries(data.series)
+      }
+    } catch {}
+  }, [])
+
   const fetchDetail = async (name: string) => {
     try {
       const res = await fetch(`${API}/api/ai/traders/${name}`)
@@ -79,9 +101,10 @@ export default function AiTradersPage() {
 
   useEffect(() => {
     fetchTraders()
+    fetchSnapshots()
     const interval = setInterval(fetchTraders, 60000)
     return () => clearInterval(interval)
-  }, [fetchTraders])
+  }, [fetchTraders, fetchSnapshots])
 
   return (
     <main className="max-w-5xl mx-auto px-4 py-8">
@@ -90,6 +113,53 @@ export default function AiTradersPage() {
       </div>
       <h1 className="text-3xl font-bold text-white mb-1">🤖 AI Traders</h1>
       <p className="text-gray-400 mb-8">Four AI models competing with $10K each</p>
+
+      {/* Performance Charts */}
+      <div className="mb-8 bg-gray-900 rounded-lg border border-gray-800 p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-white">📈 Performance</h2>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setChartTab('value')}
+              className={`px-3 py-1 rounded text-sm font-medium transition ${
+                chartTab === 'value'
+                  ? 'bg-gray-700 text-white'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              Portfolio Value ($)
+            </button>
+            <button
+              onClick={() => setChartTab('pct')}
+              className={`px-3 py-1 rounded text-sm font-medium transition ${
+                chartTab === 'pct'
+                  ? 'bg-gray-700 text-white'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              Return (%)
+            </button>
+          </div>
+        </div>
+
+        {/* Legend */}
+        {chartSeries.length > 0 && (
+          <div className="flex flex-wrap gap-4 mb-4">
+            {chartSeries.map((s) => (
+              <div key={s.id} className="flex items-center gap-1.5 text-sm">
+                <span className="w-3 h-0.5 inline-block rounded" style={{ backgroundColor: s.color }} />
+                <span className="text-gray-400">{s.name}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <PerformanceChart
+          series={chartSeries}
+          height={260}
+          showPct={chartTab === 'pct'}
+        />
+      </div>
 
       {loading ? (
         <div className="text-gray-500 text-center py-12">Loading...</div>

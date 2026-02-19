@@ -2,8 +2,12 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import dynamic from 'next/dynamic'
+
+const PerformanceChart = dynamic(() => import('../../components/PerformanceChart'), { ssr: false })
 
 const API = ''
+const EXTERNAL_API = 'https://hldesk-funding-api.fly.dev'
 
 interface Portfolio {
   id: string
@@ -51,6 +55,13 @@ interface Transaction {
   created_at: string
 }
 
+interface SnapshotSeries {
+  id: string
+  name: string
+  color: string
+  data: { time: string; value: number; pnl_pct: number }[]
+}
+
 function formatUsd(n: number) {
   return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 })
 }
@@ -68,6 +79,8 @@ export default function PaperTradingPage() {
   const [portfolios, setPortfolios] = useState<Portfolio[]>([])
   const [selected, setSelected] = useState<PortfolioDetail | null>(null)
   const [loading, setLoading] = useState(true)
+  const [chartSeries, setChartSeries] = useState<SnapshotSeries[]>([])
+  const [chartTab, setChartTab] = useState<'value' | 'pct'>('value')
 
   async function fetchPortfolios() {
     try {
@@ -75,6 +88,16 @@ export default function PaperTradingPage() {
       if (res.ok) setPortfolios(await res.json())
     } catch {}
     setLoading(false)
+  }
+
+  async function fetchSnapshots() {
+    try {
+      const res = await fetch(`${EXTERNAL_API}/api/paper/snapshots?days=7`)
+      if (res.ok) {
+        const data = await res.json()
+        if (data.series) setChartSeries(data.series)
+      }
+    } catch {}
   }
 
   async function fetchDetail(id: string) {
@@ -86,6 +109,7 @@ export default function PaperTradingPage() {
 
   useEffect(() => {
     fetchPortfolios()
+    fetchSnapshots()
     const interval = setInterval(fetchPortfolios, 60000)
     return () => clearInterval(interval)
   }, [])
@@ -100,6 +124,53 @@ export default function PaperTradingPage() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-white">📊 Paper Trading Dashboard</h1>
         <Link href="/" className="text-blue-400 hover:text-blue-300 text-sm">← Back to Funding Rates</Link>
+      </div>
+
+      {/* Performance Charts */}
+      <div className="mb-8 bg-gray-900 rounded-lg border border-gray-800 p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-white">📈 Performance</h2>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setChartTab('value')}
+              className={`px-3 py-1 rounded text-sm font-medium transition ${
+                chartTab === 'value'
+                  ? 'bg-gray-700 text-white'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              Portfolio Value ($)
+            </button>
+            <button
+              onClick={() => setChartTab('pct')}
+              className={`px-3 py-1 rounded text-sm font-medium transition ${
+                chartTab === 'pct'
+                  ? 'bg-gray-700 text-white'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              Return (%)
+            </button>
+          </div>
+        </div>
+
+        {/* Legend */}
+        {chartSeries.length > 0 && (
+          <div className="flex flex-wrap gap-4 mb-4">
+            {chartSeries.map((s) => (
+              <div key={s.id} className="flex items-center gap-1.5 text-sm">
+                <span className="w-3 h-0.5 inline-block rounded" style={{ backgroundColor: s.color }} />
+                <span className="text-gray-400">{s.name}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <PerformanceChart
+          series={chartSeries}
+          height={260}
+          showPct={chartTab === 'pct'}
+        />
       </div>
 
       {/* Leaderboard */}

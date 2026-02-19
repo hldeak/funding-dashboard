@@ -306,6 +306,193 @@ app.post('/api/ai/run/:name', async (c) => {
   }
 })
 
+// Color maps for consistent series colors
+const PORTFOLIO_COLORS: Record<string, string> = {
+  aggressive: '#10b981',
+  conservative: '#3b82f6',
+  diversified: '#f59e0b',
+  'negative fade': '#8b5cf6',
+  'negative_fade': '#8b5cf6',
+}
+
+const TRADER_COLORS: Record<string, string> = {
+  opus: '#a78bfa',
+  flash: '#fbbf24',
+  deepseek: '#f87171',
+  sonnet: '#34d399',
+}
+
+function getPortfolioColor(name: string): string {
+  const lower = name.toLowerCase()
+  for (const [key, color] of Object.entries(PORTFOLIO_COLORS)) {
+    if (lower.includes(key)) return color
+  }
+  return '#6b7280'
+}
+
+function getTraderColor(name: string): string {
+  const lower = name.toLowerCase()
+  for (const [key, color] of Object.entries(TRADER_COLORS)) {
+    if (lower.includes(key)) return color
+  }
+  return '#6b7280'
+}
+
+// GET /api/paper/snapshots?days=7
+app.get('/api/paper/snapshots', async (c) => {
+  const db = await getPaperClient()
+  if (!db) return c.json({ error: 'DB not configured' }, 500)
+
+  const days = Math.min(Math.max(Number(c.req.query('days') || 7), 1), 90)
+  const since = new Date(Date.now() - days * 86400000).toISOString()
+
+  const { data: portfolios, error: pErr } = await db.from('paper_portfolios').select('id, strategy_name')
+  if (pErr) return c.json({ error: pErr.message }, 500)
+
+  const series = await Promise.all((portfolios ?? []).map(async (p: any) => {
+    const { data: snaps } = await db
+      .from('paper_snapshots')
+      .select('snapshot_at, total_value')
+      .eq('portfolio_id', p.id)
+      .gte('snapshot_at', since)
+      .order('snapshot_at', { ascending: true })
+
+    const baseline = 10000
+    const data = (snaps ?? []).map((s: any) => ({
+      time: s.snapshot_at,
+      value: Number(s.total_value),
+      pnl_pct: ((Number(s.total_value) - baseline) / baseline) * 100,
+    }))
+
+    return {
+      id: p.id,
+      name: p.strategy_name,
+      color: getPortfolioColor(p.strategy_name),
+      data,
+    }
+  }))
+
+  return c.json({ series })
+})
+
+// GET /api/ai/snapshots?days=7
+app.get('/api/ai/snapshots', async (c) => {
+  const db = await getPaperClient()
+  if (!db) return c.json({ error: 'DB not configured' }, 500)
+
+  const days = Math.min(Math.max(Number(c.req.query('days') || 7), 1), 90)
+  const since = new Date(Date.now() - days * 86400000).toISOString()
+
+  const { data: traders, error: tErr } = await db.from('ai_traders').select('id, name').order('name')
+  if (tErr) return c.json({ error: tErr.message }, 500)
+
+  const series = await Promise.all((traders ?? []).map(async (t: any) => {
+    const { data: snaps } = await db
+      .from('ai_snapshots')
+      .select('snapshot_at, total_value')
+      .eq('trader_id', t.id)
+      .gte('snapshot_at', since)
+      .order('snapshot_at', { ascending: true })
+
+    const baseline = 10000
+    const data = (snaps ?? []).map((s: any) => ({
+      time: s.snapshot_at,
+      value: Number(s.total_value),
+      pnl_pct: ((Number(s.total_value) - baseline) / baseline) * 100,
+    }))
+
+    return {
+      id: t.id,
+      name: t.name,
+      color: getTraderColor(t.name),
+      data,
+    }
+  }))
+
+  return c.json({ series })
+})
+
+// POST /api/internal/snapshot — called hourly by cron
+app.post('/api/internal/snapshot', async (c) => {
+  const db = await getPaperClient()
+  if (!db) return c.json({ error: 'DB not configured' }, 500)
+
+  let snapshotted = 0
+  const now = new Date().toISOString()
+
+  // ── Paper portfolios ──
+  const { data: portfolios } = await db.from('paper_portfolios').select('*')
+  const cachedResult = await getCachedRates()
+  const spreadsMap = new Map(cachedResult.spreads.map((s: any) => [s.asset, s]))
+
+  await Promise.all((portfolios ?? []).map(async (p: any) => {
+    const { data: positions } = await db.from('paper_positions').select('*').eq('portfolio_id', p.id).eq('is_open', true)
+    const { data: fundingTxns } = await db.from('paper_transactions').select('amount').eq('portfolio_id', p.id).eq('type', 'funding')
+
+    const positionValue = (positions ?? []).reduce((s: number, pos: any) => {
+      const spread = spreadsMap.get(pos.asset) as any
+      const currentPrice = spread?.hl?.markPrice ?? null
+      const unrealizedPnl = computePaperUnrealizedPnl(pos, currentPrice)
+      return s + pos.size_usd + unrealizedPnl + (pos.total_funding_collected ?? 0)
+    }, 0)
+
+    const totalFunding = (fundingTxns ?? []).reduce((s: number, t: any) => s + t.amount, 0)
+    const totalValue = p.cash_balance + positionValue
+    const unrealizedPnl = (positions ?? []).reduce((s: number, pos: any) => {
+      const spread = spreadsMap.get(pos.asset) as any
+      const currentPrice = spread?.hl?.markPrice ?? null
+      return s + computePaperUnrealizedPnl(pos, currentPrice)
+    }, 0)
+
+    await db.from('paper_snapshots').insert({
+      portfolio_id: p.id,
+      snapshot_at: now,
+      total_value: totalValue,
+      cash_balance: p.cash_balance,
+      unrealized_pnl: unrealizedPnl,
+      funding_collected: totalFunding,
+      open_positions: (positions ?? []).length,
+    })
+    snapshotted++
+  }))
+
+  // ── AI traders ──
+  const { data: traders } = await db.from('ai_traders').select('*')
+
+  await Promise.all((traders ?? []).map(async (t: any) => {
+    const { data: positions } = await db.from('ai_positions').select('*').eq('trader_id', t.id).eq('is_open', true)
+    const { data: allPositions } = await db.from('ai_positions').select('funding_collected').eq('trader_id', t.id)
+
+    const totalPositionValue = (positions ?? []).reduce((s: number, p: any) => {
+      const spread = spreadsMap.get(p.asset) as any
+      const currentPrice = spread?.hl?.markPrice ?? null
+      const unrealizedPnl = computeAiUnrealizedPnl(p, currentPrice)
+      return s + p.size_usd + unrealizedPnl + (p.funding_collected ?? 0)
+    }, 0)
+
+    const totalFunding = (allPositions ?? []).reduce((s: number, p: any) => s + (p.funding_collected ?? 0), 0)
+    const totalValue = t.cash_balance + totalPositionValue
+    const unrealizedPnl = (positions ?? []).reduce((s: number, p: any) => {
+      const spread = spreadsMap.get(p.asset) as any
+      const currentPrice = spread?.hl?.markPrice ?? null
+      return s + computeAiUnrealizedPnl(p, currentPrice)
+    }, 0)
+
+    await db.from('ai_snapshots').insert({
+      trader_id: t.id,
+      snapshot_at: now,
+      total_value: totalValue,
+      cash_balance: t.cash_balance,
+      unrealized_pnl: unrealizedPnl,
+      funding_collected: totalFunding,
+      open_positions: (positions ?? []).length,
+    })
+    snapshotted++
+  }))
+
+  return c.json({ ok: true, snapshotted })
+})
+
 // Background polling — fetch every 30 seconds
 async function poll() {
   try {
