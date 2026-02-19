@@ -34,7 +34,7 @@ interface AiPosition {
   id: string
   trader_id: string
   asset: string
-  side: 'long' | 'short'
+  direction: 'long' | 'short'
   size_usd: number
   entry_rate_8h: number
   funding_collected: number
@@ -190,7 +190,7 @@ export async function runAiTraderCycle(traderName: string): Promise<Decision> {
     const hourlyRate = currentRate8h / 8
 
     // short: positive rate = collect; long: negative rate = collect
-    const direction = pos.side === 'short' ? 1 : -1
+    const direction = pos.direction === 'short' ? 1 : -1
     const fundingEarned = pos.size_usd * hourlyRate * periodsElapsed * direction
 
     if (Math.abs(fundingEarned) < 0.001) continue
@@ -227,7 +227,7 @@ export async function runAiTraderCycle(traderName: string): Promise<Decision> {
     : openPositions.map(p => {
         const spread = spreadsMap.get(p.asset)
         const currentRate = spread?.hl?.rate8h ?? 0
-        return `  - ${p.side.toUpperCase()} ${p.asset}: $${p.size_usd.toFixed(0)}, entry rate: ${(p.entry_rate_8h * 100).toFixed(4)}%, current rate: ${(currentRate * 100).toFixed(4)}%, funding collected: $${p.funding_collected.toFixed(2)}`
+        return `  - ${p.direction.toUpperCase()} ${p.asset}: $${p.size_usd.toFixed(0)}, entry rate: ${(p.entry_rate_8h * 100).toFixed(4)}%, current rate: ${(currentRate * 100).toFixed(4)}%, funding collected: $${p.funding_collected.toFixed(2)}`
       }).join('\n')
 
   // Step 4: Call LLM
@@ -236,13 +236,13 @@ export async function runAiTraderCycle(traderName: string): Promise<Decision> {
 Your personality: ${t.persona}
 
 Rules:
-- You trade perpetual futures on Hyperliquid using funding rate arbitrage and directional views
+- You trade perpetual futures on Hyperliquid using funding rate arbitrage
 - Max 3 open positions at once
 - Max 30% of portfolio per position
-- You can go LONG or SHORT
-- Funding arb: short when HL rate is positive (collect funding), long when deeply negative
-- You can also take directional views based on market conditions
-- Always explain your reasoning clearly
+- PRIMARY STRATEGY: funding arb — short when HL rate is POSITIVE (you collect funding payments), long when HL rate is deeply NEGATIVE (longs collect)
+- CROSS-EXCHANGE SIGNAL: if HL rate is positive but CEX rates are deeply negative, it means HL longs are overpaying — strong short signal
+- POSITION SIZING: use the spread size to size your conviction. 0.01%+ spread = worth trading
+- Always explain your reasoning clearly`
 
 Your portfolio:
 - Cash: $${cashBalance.toFixed(2)}
@@ -294,7 +294,7 @@ Only one action per turn.`
       await db.from('ai_positions').insert({
         trader_id: t.id,
         asset,
-        side,
+        direction: side,
         size_usd: size,
         entry_rate_8h: entryRate,
         funding_collected: 0,
@@ -321,7 +321,7 @@ Only one action per turn.`
       }).eq('id', pos.id)
 
       cashBalance += pos.size_usd - fee
-      console.log(`[AI:${t.name}] closed ${pos.side.toUpperCase()} ${asset} $${pos.size_usd.toFixed(0)}, PnL: $${pnl.toFixed(2)} — ${decision.reasoning}`)
+      console.log(`[AI:${t.name}] closed ${pos.direction.toUpperCase()} ${asset} $${pos.size_usd.toFixed(0)}, PnL: $${pnl.toFixed(2)} — ${decision.reasoning}`)
     } else {
       decision.action = 'hold'
       decision.reasoning = `Tried to close ${asset} but no open position found. ${decision.reasoning}`

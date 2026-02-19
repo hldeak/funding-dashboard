@@ -187,8 +187,8 @@ export default function AiTradersPage() {
                   {selected.positions.map((p: any) => (
                     <div key={p.id} className="bg-gray-800 rounded p-3 flex justify-between items-center text-sm">
                       <div>
-                        <span className={`font-bold ${p.side === 'long' ? 'text-green-400' : 'text-red-400'}`}>
-                          {p.side.toUpperCase()}
+                        <span className={`font-bold ${p.direction === 'long' ? 'text-green-400' : 'text-red-400'}`}>
+                          {(p.direction ?? p.side ?? "?").toUpperCase()}
                         </span>
                         <span className="text-white ml-2 font-mono">{p.asset}</span>
                         <span className="text-gray-500 ml-2">${p.size_usd.toFixed(0)}</span>
