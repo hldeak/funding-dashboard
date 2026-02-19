@@ -58,9 +58,11 @@ export default function AiTradersPage() {
   const [selected, setSelected] = useState<TraderDetail | null>(null)
   const [loading, setLoading] = useState(true)
 
+  const API = 'https://hldesk-funding-api.fly.dev'
+
   const fetchTraders = useCallback(async () => {
     try {
-      const res = await fetch('/api/ai/traders')
+      const res = await fetch(`${API}/api/ai/traders`)
       const data = await res.json()
       if (Array.isArray(data)) setTraders(data)
     } catch {}
@@ -69,7 +71,7 @@ export default function AiTradersPage() {
 
   const fetchDetail = async (name: string) => {
     try {
-      const res = await fetch(`/api/ai/traders/${name}`)
+      const res = await fetch(`${API}/api/ai/traders/${name}`)
       const data = await res.json()
       if (data.id) setSelected(data)
     } catch {}

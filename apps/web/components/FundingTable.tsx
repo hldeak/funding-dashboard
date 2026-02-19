@@ -84,7 +84,7 @@ export default function FundingTable() {
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch(`/api/funding?limit=100`)
+      const res = await fetch(`https://hldesk-funding-api.fly.dev/api/funding?limit=100`)
       if (!res.ok) throw new Error('fetch failed')
       const json = await res.json()
       setData(json)
