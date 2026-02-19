@@ -201,7 +201,8 @@ async function processPortfolio(
   // Step 3: Check entry conditions
   const totalPositionValue = remainingPositions.reduce((sum, p) => sum + p.size_usd, 0)
   const totalValue = cashBalance + totalPositionValue
-  const maxPositionSize = totalValue * (config.max_position_size_pct ?? 20) / 100
+  // config stores as decimal (0.20 = 20%), so multiply directly (no /100)
+  const maxPositionSize = totalValue * (config.max_position_size_pct ?? 0.20)
   const maxPositions = config.max_positions ?? 5
   const openAssets = new Set(remainingPositions.map(p => p.asset))
 
