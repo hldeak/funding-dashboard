@@ -19,6 +19,8 @@ interface AiTrader {
   open_positions_count: number
   total_funding_collected: number
   last_decision: { action: string; reasoning: string; asset?: string; created_at: string } | null
+  sharpe: number | null
+  max_drawdown: number | null
 }
 
 interface TraderDetail extends AiTrader {
@@ -31,6 +33,20 @@ interface SnapshotSeries {
   name: string
   color: string
   data: { time: string; value: number; pnl_pct: number }[]
+}
+
+function SharpeMaxDD({ sharpe, max_drawdown, positions }: { sharpe: number | null; max_drawdown: number | null; positions: number }) {
+  const sharpeColor = sharpe === null ? 'text-gray-500' : sharpe > 1 ? 'text-green-400' : sharpe >= 0 ? 'text-yellow-400' : 'text-red-400'
+  const ddStr = max_drawdown === null ? '—' : `${(max_drawdown * 100).toFixed(2)}%`
+  return (
+    <div className="flex items-center gap-3 text-xs mt-2 text-gray-500">
+      <span>Sharpe: <span className={sharpeColor + ' font-mono'}>{sharpe === null ? '—' : sharpe.toFixed(2)}</span></span>
+      <span className="text-gray-700">|</span>
+      <span>Max DD: <span className={max_drawdown === null ? 'text-gray-500 font-mono' : 'text-red-400 font-mono'}>{ddStr}</span></span>
+      <span className="text-gray-700">|</span>
+      <span>{positions}/3 positions</span>
+    </div>
+  )
 }
 
 function ActionBadge({ action }: { action: string }) {
@@ -201,8 +217,9 @@ export default function AiTradersPage() {
                       </span>
                     </div>
                   </div>
+                  <SharpeMaxDD sharpe={t.sharpe} max_drawdown={t.max_drawdown} positions={t.open_positions_count} />
                   {t.last_decision && (
-                    <div className="flex items-start gap-2">
+                    <div className="flex items-start gap-2 mt-2">
                       <ActionBadge action={t.last_decision.action} />
                       {t.last_decision.asset && <span className="text-gray-400 text-sm font-mono">{t.last_decision.asset}</span>}
                       <span className="text-gray-500 text-sm line-clamp-2">{t.last_decision.reasoning}</span>

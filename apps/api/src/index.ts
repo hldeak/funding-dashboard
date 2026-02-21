@@ -50,6 +50,40 @@ app.get('/api/funding', async (c) => {
   return c.json(result.spreads.slice(0, limit))
 })
 
+/** Compute Sharpe ratio (annualized hourly) and Max Drawdown from a list of snapshot values */
+function computeSharpeAndDrawdown(values: number[]): { sharpe: number | null; max_drawdown: number | null } {
+  if (values.length < 2) return { sharpe: null, max_drawdown: null }
+
+  // Hourly returns
+  const returns: number[] = []
+  for (let i = 1; i < values.length; i++) {
+    if (values[i - 1] > 0) {
+      returns.push((values[i] - values[i - 1]) / values[i - 1])
+    }
+  }
+  if (returns.length < 2) return { sharpe: null, max_drawdown: null }
+
+  const n = returns.length
+  const mean = returns.reduce((s, r) => s + r, 0) / n
+  const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / (n - 1)
+  const std = Math.sqrt(variance)
+  const sharpe = std > 0 ? Number(((mean / std) * Math.sqrt(8760)).toFixed(3)) : null
+
+  // Max drawdown
+  let peak = values[0]
+  let maxDD = 0
+  for (const v of values) {
+    if (v > peak) peak = v
+    if (peak > 0) {
+      const dd = (peak - v) / peak
+      if (dd > maxDD) maxDD = dd
+    }
+  }
+  const max_drawdown = maxDD > 0 ? Number((-maxDD).toFixed(5)) : 0
+
+  return { sharpe, max_drawdown }
+}
+
 /** Compute unrealized P&L for a paper position given current mark price */
 function computePaperUnrealizedPnl(pos: any, currentPrice: number | null): number {
   if (!currentPrice || !pos.entry_price) return 0
@@ -75,6 +109,7 @@ app.get('/api/paper/portfolios', async (c) => {
   const results = await Promise.all((portfolios ?? []).map(async (p: any) => {
     const { data: positions } = await db.from('paper_positions').select('*').eq('portfolio_id', p.id).eq('is_open', true)
     const { data: fundingTxns } = await db.from('paper_transactions').select('amount').eq('portfolio_id', p.id).eq('type', 'funding')
+    const { data: snaps } = await db.from('paper_snapshots').select('total_value').eq('portfolio_id', p.id).order('snapshot_at', { ascending: true })
 
     // Mark-to-market: size_usd + unrealized_pnl + total_funding_collected per position
     const positionValue = (positions ?? []).reduce((s: number, pos: any) => {
@@ -89,6 +124,9 @@ app.get('/api/paper/portfolios', async (c) => {
     const totalPnl = totalValue - p.initial_balance
     const daysRunning = Math.max(1, Math.floor((Date.now() - new Date(p.created_at).getTime()) / 86400000))
 
+    const snapValues = (snaps ?? []).map((s: any) => Number(s.total_value))
+    const { sharpe, max_drawdown } = computeSharpeAndDrawdown(snapValues)
+
     return {
       ...p,
       total_value: totalValue,
@@ -98,6 +136,8 @@ app.get('/api/paper/portfolios', async (c) => {
       total_funding_collected: totalFunding,
       days_running: daysRunning,
       mark_to_market: true,
+      sharpe,
+      max_drawdown,
     }
   }))
 
@@ -149,8 +189,33 @@ app.get('/api/paper/portfolios/:id', async (c) => {
   if (error || !portfolio) return c.json({ error: 'Not found' }, 404)
 
   const { data: positions } = await db.from('paper_positions').select('*').eq('portfolio_id', id).eq('is_open', true)
+  const { data: closedPositions } = await db.from('paper_positions').select('*').eq('portfolio_id', id).eq('is_open', false).order('opened_at', { ascending: false }).limit(20)
   const { data: transactions } = await db.from('paper_transactions').select('*').eq('portfolio_id', id).order('created_at', { ascending: false }).limit(50)
   const { data: fundingTxns } = await db.from('paper_transactions').select('amount').eq('portfolio_id', id).eq('type', 'funding')
+
+  // Get close timestamps from transactions for closed positions
+  const closedIds = (closedPositions ?? []).map((p: any) => p.id).filter(Boolean)
+  let closeTxnMap = new Map<string, any>()
+  if (closedIds.length > 0) {
+    const { data: closeTxns } = await db.from('paper_transactions').select('position_id, amount, created_at').in('position_id', closedIds).eq('type', 'close')
+    for (const t of closeTxns ?? []) {
+      closeTxnMap.set(t.position_id, t)
+    }
+  }
+  const closedEnriched = (closedPositions ?? []).map((pos: any) => {
+    const closeTxn = closeTxnMap.get(pos.id)
+    return {
+      id: pos.id,
+      asset: pos.asset,
+      side: pos.side,
+      size_usd: pos.size_usd,
+      entry_rate_8h: pos.entry_rate_8h,
+      total_funding_collected: pos.total_funding_collected,
+      opened_at: pos.opened_at,
+      closed_at: closeTxn?.created_at ?? null,
+      pnl: pos.total_funding_collected ?? null, // best proxy: funding is the main source of PnL
+    }
+  })
 
   const cachedResult = await getCachedRates()
   const spreadsMap = new Map(cachedResult.spreads.map(s => [s.asset, s]))
@@ -188,6 +253,7 @@ app.get('/api/paper/portfolios/:id', async (c) => {
     days_running: Math.max(1, Math.floor((Date.now() - new Date(p.created_at).getTime()) / 86400000)),
     mark_to_market: true,
     positions: enrichedPositions,
+    closed_positions: closedEnriched,
     recent_transactions: transactions ?? [],
   })
 })
@@ -217,6 +283,7 @@ app.get('/api/ai/traders', async (c) => {
     const { data: positions } = await db.from('ai_positions').select('*').eq('trader_id', t.id).eq('is_open', true)
     const { data: allPositions } = await db.from('ai_positions').select('funding_collected').eq('trader_id', t.id)
     const { data: decisions } = await db.from('ai_decisions').select('action, reasoning, asset, created_at').eq('trader_id', t.id).order('created_at', { ascending: false }).limit(1)
+    const { data: snaps } = await db.from('ai_snapshots').select('total_value').eq('trader_id', t.id).order('snapshot_at', { ascending: true })
 
     // Mark-to-market: size_usd + unrealized_pnl + funding_collected per position
     const totalPositionValue = (positions ?? []).reduce((s: number, p: any) => {
@@ -230,6 +297,9 @@ app.get('/api/ai/traders', async (c) => {
     const totalValue = t.cash_balance + totalPositionValue
     const totalPnl = totalValue - 10000
 
+    const snapValues = (snaps ?? []).map((s: any) => Number(s.total_value))
+    const { sharpe, max_drawdown } = computeSharpeAndDrawdown(snapValues)
+
     return {
       ...t,
       total_value: totalValue,
@@ -238,6 +308,8 @@ app.get('/api/ai/traders', async (c) => {
       open_positions_count: (positions ?? []).length,
       total_funding_collected: totalFunding,
       last_decision: decisions?.[0] ?? null,
+      sharpe,
+      max_drawdown,
     }
   }))
 
