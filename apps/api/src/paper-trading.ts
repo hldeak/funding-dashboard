@@ -156,6 +156,14 @@ async function processPortfolio(
       const hlRate = spread.hl?.rate8h ?? 0
       const exitThreshold = config.exit_rate_threshold ?? -0.01
       shouldExit = hlRate > exitThreshold
+    } else if (portfolio.strategy_name === 'regime_adaptive') {
+      const hlRate = spread.hl?.rate8h ?? 0
+      const exitThreshold = config.exit_rate_threshold ?? 0.0001 // exit near zero
+      if (pos.side === 'long_perp') {
+        shouldExit = hlRate > exitThreshold // long: exit when rate recovers toward positive
+      } else {
+        shouldExit = hlRate < -exitThreshold // short: exit when rate goes negative
+      }
     } else {
       const currentSpread = spread.maxSpread
       const exitSpread = config.exit_spread_threshold ?? 0.01
@@ -226,6 +234,32 @@ async function processPortfolio(
         (s.hl?.rate8h ?? 0) > 0 && // Only short when HL rate is positive (we collect)
         !openAssets.has(s.asset)
       ).sort((a, b) => b.maxSpread - a.maxSpread)
+    } else if (portfolio.strategy_name === 'regime_adaptive') {
+      // Catches funding on BOTH sides:
+      // - HL rate deeply positive (> threshold) → SHORT (shorts collect funding)
+      // - HL rate deeply negative (< -threshold) → LONG (longs collect funding)
+      // - In between → sit in cash
+      const positiveThreshold = config.positive_rate_threshold ?? 0.0003  // +0.03%/8h to go short
+      const negativeThreshold = config.negative_rate_threshold ?? -0.0003 // -0.03%/8h to go long
+
+      // Close positions that have moved into neutral territory
+      // (handled in exit logic above, regime_adaptive exits when rate crosses zero)
+
+      // Find best short candidates (HL rate positive)
+      const shortCandidates = allSpreads.filter(s =>
+        s.hl && s.hl.rate8h > positiveThreshold && !openAssets.has(s.asset)
+      ).sort((a, b) => (b.hl?.rate8h ?? 0) - (a.hl?.rate8h ?? 0))
+
+      // Find best long candidates (HL rate negative)
+      const longCandidates = allSpreads.filter(s =>
+        s.hl && s.hl.rate8h < negativeThreshold && !openAssets.has(s.asset)
+      ).sort((a, b) => (a.hl?.rate8h ?? 0) - (b.hl?.rate8h ?? 0))
+
+      // Prioritize the more extreme signal — whoever is paying more right now
+      const bestShortRate = shortCandidates[0]?.hl?.rate8h ?? 0
+      const bestLongRate = Math.abs(longCandidates[0]?.hl?.rate8h ?? 0)
+
+      candidates = bestLongRate >= bestShortRate ? longCandidates : shortCandidates
     } else {
       // aggressive: only enter short_perp when HL rate is positive (collecting funding)
       // negative rates = paying funding = wrong direction for this strategy
@@ -247,8 +281,10 @@ async function processPortfolio(
       const fee = positionSize * TRADING_FEE
       if (cashBalance < positionSize + fee) break
 
-      const side = portfolio.strategy_name === 'negative_fade' ? 'long_perp' : 'short_perp'
       const hlRate = candidate.hl?.rate8h ?? 0
+      const side = (portfolio.strategy_name === 'negative_fade' || 
+        (portfolio.strategy_name === 'regime_adaptive' && hlRate < 0))
+        ? 'long_perp' : 'short_perp'
 
       // Don't enter a position we already have open in this asset
       const existingPosition = remainingPositions.find(p => p.asset === candidate.asset)
