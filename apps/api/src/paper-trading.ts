@@ -34,6 +34,7 @@ interface Position {
   side: string // 'short_perp' | 'long_perp'
   size_usd: number
   entry_rate_8h: number
+  entry_price: number | null
   total_funding_collected: number
   last_funding_collected: string
   opened_at: string
@@ -151,31 +152,77 @@ async function processPortfolio(
     if (!spread) continue
 
     let shouldExit = false
+    let exitReason = 'strategy'
 
-    if (portfolio.strategy_name === 'negative_fade') {
-      const hlRate = spread.hl?.rate8h ?? 0
-      const exitThreshold = config.exit_rate_threshold ?? -0.01
-      shouldExit = hlRate > exitThreshold
-    } else if (portfolio.strategy_name === 'regime_adaptive') {
-      const hlRate = spread.hl?.rate8h ?? 0
-      const exitThreshold = config.exit_rate_threshold ?? 0.0001 // exit near zero
-      if (pos.side === 'long_perp') {
-        shouldExit = hlRate > exitThreshold // long: exit when rate recovers toward positive
+    // --- Stop loss check (runs BEFORE strategy-specific logic) ---
+    const currentExitPrice = spread?.hl?.markPrice ?? null
+    const entryPriceForSL = pos.entry_price ?? null
+    const stopLossPct = config.stop_loss_pct ?? 0.10
+
+    if (currentExitPrice && entryPriceForSL && entryPriceForSL > 0) {
+      let unrealizedPricePct = 0
+      if (pos.side === 'short_perp') {
+        unrealizedPricePct = (entryPriceForSL - currentExitPrice) / entryPriceForSL // positive = profit
       } else {
-        shouldExit = hlRate < -exitThreshold // short: exit when rate goes negative
+        unrealizedPricePct = (currentExitPrice - entryPriceForSL) / entryPriceForSL // positive = profit
       }
-    } else {
-      const currentSpread = spread.maxSpread
-      const exitSpread = config.exit_spread_threshold ?? 0.01
-      shouldExit = currentSpread < exitSpread
+
+      if (unrealizedPricePct < -stopLossPct) {
+        shouldExit = true
+        exitReason = 'stop_loss'
+        console.log(`[Paper] STOP LOSS triggered: ${pos.asset} ${pos.side} unrealized ${(unrealizedPricePct * 100).toFixed(2)}% < -${(stopLossPct * 100).toFixed(0)}%`)
+      }
+    }
+
+    // --- Strategy-specific exit logic (only if stop loss not already triggered) ---
+    if (!shouldExit) {
+      if (portfolio.strategy_name === 'negative_fade') {
+        const hlRate = spread.hl?.rate8h ?? 0
+        const exitThreshold = config.exit_rate_threshold ?? -0.01
+        shouldExit = hlRate > exitThreshold
+      } else if (portfolio.strategy_name === 'regime_adaptive') {
+        const hlRate = spread.hl?.rate8h ?? 0
+        const exitThreshold = config.exit_rate_threshold ?? 0.0001 // exit near zero
+        if (pos.side === 'long_perp') {
+          shouldExit = hlRate > exitThreshold // long: exit when rate recovers toward positive
+        } else {
+          shouldExit = hlRate < -exitThreshold // short: exit when rate goes negative
+        }
+      } else {
+        const currentSpread = spread.maxSpread
+        const exitSpread = config.exit_spread_threshold ?? 0.01
+        shouldExit = currentSpread < exitSpread
+      }
     }
 
     if (shouldExit) {
-      const fee = pos.size_usd * TRADING_FEE
-      // Return position size minus exit fee
-      cashBalance += pos.size_usd - fee
+      // Compute exit price and realized P&L
+      const exitPrice = spread?.hl?.markPrice ?? null
+      const entryPrice = pos.entry_price ?? null
 
-      await db.from('paper_positions').update({ is_open: false }).eq('id', pos.id)
+      let priceReturn = 0
+      if (exitPrice && entryPrice && entryPrice > 0) {
+        if (pos.side === 'short_perp') {
+          priceReturn = (entryPrice - exitPrice) / entryPrice * pos.size_usd
+        } else { // long_perp
+          priceReturn = (exitPrice - entryPrice) / entryPrice * pos.size_usd
+        }
+      }
+
+      const exitFee = pos.size_usd * TRADING_FEE
+      const fundingCollected = pos.total_funding_collected ?? 0
+      const realizedPnl = priceReturn + fundingCollected - exitFee
+      // Note: entry fee was already deducted from cash when opening
+
+      // Return to cash: original size + price profit/loss + funding - exit fee
+      cashBalance += pos.size_usd + priceReturn + fundingCollected - exitFee
+
+      await db.from('paper_positions').update({
+        is_open: false,
+        exit_price: exitPrice,
+        realized_pnl: realizedPnl,
+        closed_at: now.toISOString(),
+      }).eq('id', pos.id)
 
       await db.from('paper_transactions').insert([
         {
@@ -183,14 +230,14 @@ async function processPortfolio(
           position_id: pos.id,
           type: 'close',
           asset: pos.asset,
-          amount: pos.size_usd - fee,
-          note: `Closed ${pos.asset} $${pos.size_usd.toFixed(0)}, fee: $${fee.toFixed(2)}`,
+          amount: pos.size_usd + priceReturn + fundingCollected - exitFee,
+          note: `Closed ${pos.asset} $${pos.size_usd.toFixed(0)} (${exitReason}), price P&L: $${priceReturn.toFixed(2)}, fee: $${exitFee.toFixed(2)}`,
         },
       ])
 
       positionsToRemove.push(pos.id)
 
-      console.log(`[Paper] '${portfolio.strategy_name}': closed ${pos.asset} position $${pos.size_usd.toFixed(0)}, funding collected: $${pos.total_funding_collected.toFixed(2)}`)
+      console.log(`[Paper] '${portfolio.strategy_name}': closed ${pos.asset} position $${pos.size_usd.toFixed(0)}, realized P&L: $${realizedPnl.toFixed(2)} (price: $${priceReturn.toFixed(2)}, funding: $${fundingCollected.toFixed(2)}, fee: -$${exitFee.toFixed(2)}) [${exitReason}]`)
     }
   }
 
@@ -303,6 +350,7 @@ async function processPortfolio(
         total_funding_collected: 0,
         last_funding_collected: now.toISOString(),
         opened_at: now.toISOString(),
+        fees_paid: positionSize * TRADING_FEE,
       })
 
       if (insertErr) {

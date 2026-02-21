@@ -27,6 +27,7 @@ interface Portfolio {
 }
 
 interface PortfolioDetail extends Portfolio {
+  stop_loss_pct: number
   positions: Position[]
   closed_positions: ClosedPosition[]
   recent_transactions: Transaction[]
@@ -45,7 +46,11 @@ interface Position {
   current_spread: number | null
   unrealized_pnl: number
   unrealized_pnl_pct: number
+  unrealized_pnl_total: number
   total_position_value: number
+  stop_loss_pct: number
+  unrealized_price_pct: number | null
+  distance_to_stop: number | null
   opened_at: string
 }
 
@@ -54,9 +59,12 @@ interface ClosedPosition {
   asset: string
   side: string
   size_usd: number
+  entry_price: number | null
   total_funding_collected: number
   opened_at: string
   closed_at: string | null
+  exit_price: number | null
+  realized_pnl: number | null
   pnl: number | null
 }
 
@@ -291,7 +299,14 @@ export default function PaperTradingPage() {
               <h2 className="text-xl font-bold text-white capitalize">{selected.strategy_name}</h2>
               <button onClick={() => setSelected(null)} className="text-gray-500 hover:text-white text-xl">✕</button>
             </div>
-            <p className="text-gray-500 text-sm mb-5">{selected.description}</p>
+            <div className="flex items-center gap-3 mb-5">
+              <p className="text-gray-500 text-sm">{selected.description}</p>
+              {selected.stop_loss_pct != null && (
+                <span className="px-2 py-0.5 rounded bg-red-900/50 text-red-300 text-xs font-medium whitespace-nowrap">
+                  🛑 Stop loss: {(selected.stop_loss_pct * 100).toFixed(0)}%
+                </span>
+              )}
+            </div>
 
             {/* Stats Row */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
@@ -333,12 +348,20 @@ export default function PaperTradingPage() {
                       <th className="text-right py-2 pr-3">Current</th>
                       <th className="text-right py-2 pr-3">Unr. P&L</th>
                       <th className="text-right py-2 pr-3">Funding</th>
+                      <th className="text-right py-2 pr-3">Stop Loss</th>
                       <th className="text-right py-2">Opened</th>
                     </tr>
                   </thead>
                   <tbody>
                     {selected.positions.map((pos) => {
                       const fmtPrice = (v: number | null) => v == null ? '—' : v < 1 ? `$${v.toFixed(5)}` : `$${v.toFixed(2)}`
+                      const slPct = pos.stop_loss_pct ?? selected.stop_loss_pct ?? 0.10
+                      const pricePct = pos.unrealized_price_pct
+                      const distToStop = pos.distance_to_stop
+                      const slColor = distToStop == null ? 'text-gray-500'
+                        : distToStop < 0.03 ? 'text-red-400'
+                        : distToStop < 0.07 ? 'text-yellow-400'
+                        : 'text-gray-400'
                       return (
                         <tr key={pos.id} className="border-b border-gray-700/50">
                           <td className="py-2 pr-3 text-white font-mono font-medium">{pos.asset}</td>
@@ -356,6 +379,15 @@ export default function PaperTradingPage() {
                           </td>
                           <td className={`py-2 pr-3 text-right tabular-nums font-mono ${pos.total_funding_collected >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                             {formatUsd(pos.total_funding_collected)}
+                          </td>
+                          <td className={`py-2 pr-3 text-right tabular-nums font-mono text-xs ${slColor}`}>
+                            {pricePct == null ? '—' : (
+                              <span title={`Stop at -${(slPct*100).toFixed(0)}%, currently ${(pricePct*100).toFixed(2)}%`}>
+                                SL -{(slPct*100).toFixed(0)}%
+                                <br />
+                                <span className="opacity-70">now {pricePct >= 0 ? '+' : ''}{(pricePct*100).toFixed(1)}%</span>
+                              </span>
+                            )}
                           </td>
                           <td className="py-2 text-right text-gray-500 text-xs whitespace-nowrap">{timeAgo(pos.opened_at)}</td>
                         </tr>
@@ -379,28 +411,36 @@ export default function PaperTradingPage() {
                         <th className="text-left py-2 pr-3">Asset</th>
                         <th className="text-left py-2 pr-3">Side</th>
                         <th className="text-right py-2 pr-3">Size</th>
-                        <th className="text-right py-2 pr-3">Funding P&L</th>
+                        <th className="text-right py-2 pr-3">Entry</th>
+                        <th className="text-right py-2 pr-3">Exit</th>
+                        <th className="text-right py-2 pr-3">Realized P&L</th>
                         <th className="text-right py-2">Closed</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {(selected.closed_positions ?? []).map((pos) => (
-                        <tr key={pos.id} className="border-b border-gray-700/50">
-                          <td className="py-2 pr-3 text-white font-mono font-medium">{pos.asset}</td>
-                          <td className="py-2 pr-3">
-                            <span className={`px-2 py-0.5 rounded text-xs font-bold ${pos.side === 'short_perp' ? 'bg-red-900 text-red-300' : 'bg-green-900 text-green-300'}`}>
-                              {pos.side === 'short_perp' ? 'SHORT' : 'LONG'}
-                            </span>
-                          </td>
-                          <td className="py-2 pr-3 text-right text-white tabular-nums">{formatUsd(pos.size_usd)}</td>
-                          <td className={`py-2 pr-3 text-right tabular-nums font-mono ${(pos.pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                            {pos.pnl !== null ? `${(pos.pnl ?? 0) >= 0 ? '+' : ''}${formatUsd(pos.pnl ?? 0)}` : '—'}
-                          </td>
-                          <td className="py-2 text-right text-gray-500 text-xs whitespace-nowrap">
-                            {pos.closed_at ? timeAgo(pos.closed_at) : '—'}
-                          </td>
-                        </tr>
-                      ))}
+                      {(selected.closed_positions ?? []).map((pos) => {
+                        const fmtPrice = (v: number | null) => v == null ? '—' : v < 1 ? `$${v.toFixed(5)}` : `$${v.toFixed(2)}`
+                        const realizedPnl = pos.realized_pnl ?? pos.pnl
+                        return (
+                          <tr key={pos.id} className="border-b border-gray-700/50">
+                            <td className="py-2 pr-3 text-white font-mono font-medium">{pos.asset}</td>
+                            <td className="py-2 pr-3">
+                              <span className={`px-2 py-0.5 rounded text-xs font-bold ${pos.side === 'short_perp' ? 'bg-red-900 text-red-300' : 'bg-green-900 text-green-300'}`}>
+                                {pos.side === 'short_perp' ? 'SHORT' : 'LONG'}
+                              </span>
+                            </td>
+                            <td className="py-2 pr-3 text-right text-white tabular-nums">{formatUsd(pos.size_usd)}</td>
+                            <td className="py-2 pr-3 text-right text-gray-400 tabular-nums font-mono text-xs">{fmtPrice(pos.entry_price)}</td>
+                            <td className="py-2 pr-3 text-right text-gray-400 tabular-nums font-mono text-xs">{fmtPrice(pos.exit_price)}</td>
+                            <td className={`py-2 pr-3 text-right tabular-nums font-mono ${(realizedPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                              {realizedPnl !== null ? `${(realizedPnl ?? 0) >= 0 ? '+' : ''}${formatUsd(realizedPnl ?? 0)}` : '—'}
+                            </td>
+                            <td className="py-2 text-right text-gray-500 text-xs whitespace-nowrap">
+                              {pos.closed_at ? timeAgo(pos.closed_at) : '—'}
+                            </td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>

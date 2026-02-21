@@ -204,27 +204,54 @@ app.get('/api/paper/portfolios/:id', async (c) => {
   }
   const closedEnriched = (closedPositions ?? []).map((pos: any) => {
     const closeTxn = closeTxnMap.get(pos.id)
+    // Use stored realized_pnl if available, fall back to funding as estimate
+    const realizedPnl = pos.realized_pnl !== null && pos.realized_pnl !== undefined
+      ? pos.realized_pnl
+      : (pos.total_funding_collected ?? null)
     return {
       id: pos.id,
       asset: pos.asset,
       side: pos.side,
       size_usd: pos.size_usd,
+      entry_price: pos.entry_price ?? null,
       entry_rate_8h: pos.entry_rate_8h,
       total_funding_collected: pos.total_funding_collected,
       opened_at: pos.opened_at,
-      closed_at: closeTxn?.created_at ?? null,
-      pnl: pos.total_funding_collected ?? null, // best proxy: funding is the main source of PnL
+      closed_at: pos.closed_at ?? closeTxn?.created_at ?? null,
+      exit_price: pos.exit_price ?? null,
+      realized_pnl: realizedPnl,
+      pnl: realizedPnl, // backward compat
+      fees_paid: pos.fees_paid ?? null,
     }
   })
 
   const cachedResult = await getCachedRates()
   const spreadsMap = new Map(cachedResult.spreads.map(s => [s.asset, s]))
 
+  const stopLossPct: number = (portfolio as any).strategy_config?.stop_loss_pct ?? 0.10
+
   const enrichedPositions = (positions ?? []).map((pos: any) => {
     const spread = spreadsMap.get(pos.asset) as any
     const currentPrice: number | null = spread?.hl?.markPrice ?? null
     const unrealizedPnl = computePaperUnrealizedPnl(pos, currentPrice)
     const unrealizedPnlPct = pos.size_usd > 0 ? (unrealizedPnl / pos.size_usd) * 100 : 0
+    const fundingCollected = pos.total_funding_collected ?? 0
+    const unrealizedPnlTotal = unrealizedPnl + fundingCollected
+
+    // Distance to stop loss (positive = buffer remaining, negative = already past stop)
+    let unrealizedPricePct: number | null = null
+    let distanceToStop: number | null = null
+    if (currentPrice && pos.entry_price && pos.entry_price > 0) {
+      if (pos.side === 'short_perp') {
+        unrealizedPricePct = (pos.entry_price - currentPrice) / pos.entry_price
+      } else {
+        unrealizedPricePct = (currentPrice - pos.entry_price) / pos.entry_price
+      }
+      // distance_to_stop: how much further price can move against us before stop triggers
+      // e.g. unrealizedPricePct = -0.032, stopLossPct = 0.15 → distanceToStop = 0.118 (11.8% buffer)
+      distanceToStop = stopLossPct + unrealizedPricePct // positive = still have buffer
+    }
+
     return {
       ...pos,
       current_price: currentPrice,
@@ -232,7 +259,11 @@ app.get('/api/paper/portfolios/:id', async (c) => {
       current_spread: spread?.maxSpread ?? null,
       unrealized_pnl: unrealizedPnl,
       unrealized_pnl_pct: unrealizedPnlPct,
-      total_position_value: pos.size_usd + unrealizedPnl + (pos.total_funding_collected ?? 0),
+      unrealized_pnl_total: unrealizedPnlTotal,
+      total_position_value: pos.size_usd + unrealizedPnl + fundingCollected,
+      stop_loss_pct: stopLossPct,
+      unrealized_price_pct: unrealizedPricePct,
+      distance_to_stop: distanceToStop,
     }
   })
 
@@ -252,6 +283,7 @@ app.get('/api/paper/portfolios/:id', async (c) => {
     total_funding_collected: totalFunding,
     days_running: Math.max(1, Math.floor((Date.now() - new Date(p.created_at).getTime()) / 86400000)),
     mark_to_market: true,
+    stop_loss_pct: stopLossPct,
     positions: enrichedPositions,
     closed_positions: closedEnriched,
     recent_transactions: transactions ?? [],
