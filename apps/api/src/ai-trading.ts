@@ -19,6 +19,8 @@ async function getServiceClient() {
 const TRADING_FEE = 0.0005 // 0.05%
 const FUNDING_PERIOD_MS = 60 * 60 * 1000 // 1 hour
 const INITIAL_BALANCE = 10000
+const STOP_LOSS_PCT = 0.15 // 15% hard stop for all AI traders
+const LLM_TIMEOUT_MS = 45_000 // 45 second timeout for LLM calls
 
 interface AiTrader {
   id: string
@@ -217,14 +219,22 @@ function formatMarketTable(ctx: (MarketContext & { cexAvgRate8h?: number })[]): 
   return lines.join('\n')
 }
 
-async function callLLM(trader: AiTrader, systemPrompt: string, userMessage: string): Promise<Decision> {
-  const apiKey = process.env.OPENROUTER_API_KEY
-  if (!apiKey) {
-    console.warn('[AI] OPENROUTER_API_KEY not set — defaulting to hold')
-    return { action: 'hold', reasoning: 'API key not configured' }
-  }
+// BUG 5 FIX: Timeout wrapper for LLM calls
+async function callLLMWithTimeout(
+  trader: AiTrader,
+  systemPrompt: string,
+  userMessage: string,
+  timeoutMs: number
+): Promise<{ content: string; timedOut: boolean }> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
+    const apiKey = process.env.OPENROUTER_API_KEY
+    if (!apiKey) {
+      return { content: '', timedOut: false }
+    }
+
     const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -240,34 +250,78 @@ async function callLLM(trader: AiTrader, systemPrompt: string, userMessage: stri
         temperature: 0.7,
         max_tokens: 500,
       }),
+      signal: controller.signal,
     })
+
+    clearTimeout(timer)
 
     if (!res.ok) {
       const text = await res.text()
       console.error(`[AI:${trader.name}] LLM API error ${res.status}: ${text}`)
-      return { action: 'hold', reasoning: `LLM API error: ${res.status}` }
+      return { content: '', timedOut: false }
     }
 
     const data = await res.json()
     const content = data.choices?.[0]?.message?.content ?? ''
-
-    // Extract JSON from response
-    const jsonMatch = content.match(/\{[\s\S]*?\}/)
-    if (!jsonMatch) {
-      console.error(`[AI:${trader.name}] No JSON in response: ${content.slice(0, 200)}`)
-      return { action: 'hold', reasoning: 'Failed to parse LLM response' }
-    }
-
-    const parsed = JSON.parse(jsonMatch[0]) as Decision
-    if (!['open_long', 'open_short', 'close', 'hold'].includes(parsed.action)) {
-      return { action: 'hold', reasoning: 'Invalid action from LLM' }
-    }
-
-    return parsed
+    return { content, timedOut: false }
   } catch (err: any) {
-    console.error(`[AI:${trader.name}] LLM call failed:`, err.message)
-    return { action: 'hold', reasoning: `LLM error: ${err.message}` }
+    clearTimeout(timer)
+    if (err.name === 'AbortError') {
+      return { content: '', timedOut: true }
+    }
+    throw err
   }
+}
+
+async function callLLM(trader: AiTrader, systemPrompt: string, userMessage: string): Promise<Decision> {
+  const apiKey = process.env.OPENROUTER_API_KEY
+  if (!apiKey) {
+    console.warn('[AI] OPENROUTER_API_KEY not set — defaulting to hold')
+    return { action: 'hold', reasoning: 'API key not configured' }
+  }
+
+  // BUG 5 FIX: Try with timeout, retry once on timeout
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const { content, timedOut } = await callLLMWithTimeout(trader, systemPrompt, userMessage, LLM_TIMEOUT_MS)
+
+      if (timedOut) {
+        console.warn(`[AI:${trader.name}] LLM timed out after ${LLM_TIMEOUT_MS / 1000}s (attempt ${attempt}/2)`)
+        if (attempt < 2) {
+          console.log(`[AI:${trader.name}] Retrying LLM call...`)
+          continue
+        }
+        return { action: 'hold', reasoning: `LLM timed out after ${LLM_TIMEOUT_MS / 1000}s — holding` }
+      }
+
+      if (!content) {
+        return { action: 'hold', reasoning: 'LLM returned empty response' }
+      }
+
+      // Extract JSON from response
+      const jsonMatch = content.match(/\{[\s\S]*?\}/)
+      if (!jsonMatch) {
+        console.error(`[AI:${trader.name}] No JSON in response: ${content.slice(0, 200)}`)
+        return { action: 'hold', reasoning: 'Failed to parse LLM response' }
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]) as Decision
+      if (!['open_long', 'open_short', 'close', 'hold'].includes(parsed.action)) {
+        return { action: 'hold', reasoning: 'Invalid action from LLM' }
+      }
+
+      return parsed
+    } catch (err: any) {
+      console.error(`[AI:${trader.name}] LLM call failed (attempt ${attempt}/2):`, err.message)
+      if (attempt < 2) {
+        console.log(`[AI:${trader.name}] Retrying after error...`)
+        continue
+      }
+      return { action: 'hold', reasoning: `LLM error: ${err.message}` }
+    }
+  }
+
+  return { action: 'hold', reasoning: 'LLM failed after retries' }
 }
 
 /** Compute unrealized P&L for a position given current mark price */
@@ -278,6 +332,40 @@ function computeUnrealizedPnl(pos: AiPosition, currentPrice: number | null): num
   } else {
     return (pos.entry_price_approx - currentPrice) / pos.entry_price_approx * pos.size_usd
   }
+}
+
+/** Close a position: compute P&L, update DB, return cash received */
+async function closePosition(
+  db: any,
+  pos: AiPosition,
+  currentRates: Map<string, { markPrice: number | null }>,
+  now: Date,
+  reason: string
+): Promise<number> {
+  const exitPrice = currentRates.get(pos.asset)?.markPrice ?? null
+  const unrealizedPnl = computeUnrealizedPnl(pos, exitPrice)
+  const exitFee = pos.size_usd * TRADING_FEE
+
+  // BUG 2 FIX: Realized P&L = price move + funding collected - entry fee - exit fee
+  const realizedPnl = unrealizedPnl + (pos.funding_collected ?? 0) - pos.fees_paid - exitFee
+
+  await db.from('ai_positions').update({
+    is_open: false,
+    pnl: realizedPnl,
+    closed_at: now.toISOString(),
+  }).eq('id', pos.id)
+
+  // BUG 2 FIX: Cash return = size + price return - exit fee only
+  // Funding was already credited to cash_balance during collection — do NOT add it again here
+  const cashReturn = pos.size_usd + unrealizedPnl - exitFee
+
+  console.log(
+    `[AI] Closed ${pos.direction.toUpperCase()} ${pos.asset} $${pos.size_usd.toFixed(0)}: ` +
+    `price PnL=$${unrealizedPnl.toFixed(2)}, funding=$${(pos.funding_collected ?? 0).toFixed(2)}, ` +
+    `fees=$${(pos.fees_paid + exitFee).toFixed(2)}, realized=$${realizedPnl.toFixed(2)} — ${reason}`
+  )
+
+  return cashReturn
 }
 
 export async function runAiTraderCycle(traderName: string): Promise<Decision> {
@@ -309,63 +397,110 @@ export async function runAiTraderCycle(traderName: string): Promise<Decision> {
   let cashBalance = t.cash_balance
   const now = new Date()
 
-  // Step 2: Collect funding on open positions
+  // Step 2: Collect funding on open positions + BUG 4 FIX: check stop losses
   const cachedResult = await getCachedRates()
   const spreadsMap = new Map<string, FundingSpread>()
   for (const s of cachedResult.spreads) spreadsMap.set(s.asset, s)
+
+  // Build a map of current prices for stop loss checks and position closing
+  const currentPriceMap = new Map<string, { markPrice: number | null }>()
+  for (const s of cachedResult.spreads) {
+    currentPriceMap.set(s.asset, { markPrice: s.hl?.markPrice ?? null })
+  }
+
+  // Track positions closed by stop loss so we don't process them further
+  const stopLossClosedIds = new Set<string>()
 
   for (const pos of openPositions) {
     const spread = spreadsMap.get(pos.asset)
     if (!spread?.hl) continue
 
+    // Collect funding
     const lastCollected = new Date(pos.last_funding_at).getTime()
     const elapsed = now.getTime() - lastCollected
     const periodsElapsed = Math.floor(elapsed / FUNDING_PERIOD_MS)
-    if (periodsElapsed <= 0) continue
+    if (periodsElapsed > 0) {
+      const currentRate8h = spread.hl.rate8h
+      const hourlyRate = currentRate8h / 8
 
-    const currentRate8h = spread.hl.rate8h
-    const hourlyRate = currentRate8h / 8
+      // short: positive rate = collect; long: negative rate = collect
+      const direction = pos.direction === 'short' ? 1 : -1
+      const fundingEarned = pos.size_usd * hourlyRate * periodsElapsed * direction
 
-    // short: positive rate = collect; long: negative rate = collect
-    const direction = pos.direction === 'short' ? 1 : -1
-    const fundingEarned = pos.size_usd * hourlyRate * periodsElapsed * direction
+      if (Math.abs(fundingEarned) >= 0.001) {
+        const newFunding = pos.funding_collected + fundingEarned
+        const newLastFunding = new Date(lastCollected + periodsElapsed * FUNDING_PERIOD_MS).toISOString()
 
-    if (Math.abs(fundingEarned) < 0.001) continue
+        await db.from('ai_positions').update({
+          funding_collected: newFunding,
+          last_funding_at: newLastFunding,
+        }).eq('id', pos.id)
 
-    const newFunding = pos.funding_collected + fundingEarned
-    const newLastFunding = new Date(lastCollected + periodsElapsed * FUNDING_PERIOD_MS).toISOString()
+        // Funding properly credited to cash once here — NOT again on close
+        cashBalance += fundingEarned
+        pos.funding_collected = newFunding
+        pos.last_funding_at = newLastFunding
 
-    await db.from('ai_positions').update({
-      funding_collected: newFunding,
-      last_funding_at: newLastFunding,
-    }).eq('id', pos.id)
+        if (Math.abs(fundingEarned) > 0.1) {
+          console.log(`[AI:${t.name}] ${fundingEarned > 0 ? 'collected' : 'paid'} $${Math.abs(fundingEarned).toFixed(2)} funding on ${pos.asset}`)
+        }
+      }
+    }
 
-    cashBalance += fundingEarned
-    pos.funding_collected = newFunding
-    pos.last_funding_at = newLastFunding
+    // BUG 4 FIX: Stop loss check
+    const entryPrice = pos.entry_price_approx
+    const currentPrice = spread.hl.markPrice ?? null
+    if (entryPrice && currentPrice && entryPrice > 0) {
+      let unrealizedPct = 0
+      if (pos.direction === 'long') {
+        unrealizedPct = (currentPrice - entryPrice) / entryPrice
+      } else {
+        unrealizedPct = (entryPrice - currentPrice) / entryPrice
+      }
 
-    if (Math.abs(fundingEarned) > 0.1) {
-      console.log(`[AI:${t.name}] ${fundingEarned > 0 ? 'collected' : 'paid'} $${Math.abs(fundingEarned).toFixed(2)} funding on ${pos.asset}`)
+      if (unrealizedPct < -STOP_LOSS_PCT) {
+        console.log(
+          `[AI:${t.name}] STOP LOSS triggered: ${pos.direction.toUpperCase()} ${pos.asset} ` +
+          `at ${(unrealizedPct * 100).toFixed(2)}% (limit: -${(STOP_LOSS_PCT * 100).toFixed(0)}%)`
+        )
+        const cashReturn = await closePosition(db, pos, currentPriceMap, now, `Stop loss at ${(unrealizedPct * 100).toFixed(2)}%`)
+        cashBalance += cashReturn
+        stopLossClosedIds.add(pos.id)
+
+        // Log the stop loss as a decision
+        await db.from('ai_decisions').insert({
+          trader_id: t.id,
+          action: 'close',
+          asset: pos.asset,
+          size_usd: pos.size_usd,
+          reasoning: `STOP LOSS: ${pos.direction.toUpperCase()} ${pos.asset} hit ${(unrealizedPct * 100).toFixed(2)}% loss (${STOP_LOSS_PCT * 100}% limit)`,
+        })
+      }
     }
   }
+
+  // Filter out stop-loss-closed positions from further processing
+  const remainingPositions = openPositions.filter(p => !stopLossClosedIds.has(p.id))
 
   // Step 3: Build market context
   const marketCtx = buildMarketContext(cachedResult.spreads)
   const marketTable = formatMarketTable(marketCtx)
 
-  // Calculate portfolio stats with mark-to-market
-  const totalPositionValue = openPositions.reduce((s, p) => {
+  // BUG 1 FIX: Calculate portfolio stats correctly — do NOT add funding_collected to position value
+  // (funding is already in cashBalance from the collection step above)
+  const totalPositionValue = remainingPositions.reduce((s, p) => {
     const spread = spreadsMap.get(p.asset)
     const currentPrice = spread?.hl?.markPrice ?? null
-    const unrealizedPnl = computeUnrealizedPnl(p, currentPrice)
-    return s + p.size_usd + unrealizedPnl + p.funding_collected
+    // Only price-based unrealized P&L — funding already in cashBalance
+    const unrealizedPricePnl = computeUnrealizedPnl(p, currentPrice)
+    return s + p.size_usd + unrealizedPricePnl
   }, 0)
   const totalValue = cashBalance + totalPositionValue
   const totalPnl = totalValue - INITIAL_BALANCE
 
-  const positionsStr = openPositions.length === 0
+  const positionsStr = remainingPositions.length === 0
     ? 'None'
-    : openPositions.map(p => {
+    : remainingPositions.map(p => {
         const spread = spreadsMap.get(p.asset)
         const currentPrice = spread?.hl?.markPrice ?? null
         const unrealizedPnl = computeUnrealizedPnl(p, currentPrice)
@@ -409,8 +544,9 @@ Only one action per turn.`
     const maxSize = totalValue * 0.3
     let size = Math.min(decision.size_usd ?? maxSize, maxSize)
     const fee = size * TRADING_FEE
+    const asset = decision.asset ?? 'BTC'
 
-    if (openPositions.length >= 3) {
+    if (remainingPositions.length >= 3) {
       decision.action = 'hold'
       decision.reasoning = `Wanted to ${decision.action} but already at max 3 positions. ${decision.reasoning}`
     } else if (cashBalance < size + fee) {
@@ -422,50 +558,43 @@ Only one action per turn.`
     }
 
     if (decision.action === 'open_long' || decision.action === 'open_short') {
-      const asset = decision.asset ?? 'BTC'
-      const side = decision.action === 'open_long' ? 'long' : 'short'
-      const spread = spreadsMap.get(asset)
-      const entryRate = spread?.hl?.rate8h ?? 0
-      const entryPrice = spread?.hl?.markPrice ?? null
-      const tradingFee = size * TRADING_FEE
+      // BUG 3 FIX: Check for duplicate position in same asset
+      const existingOpen = remainingPositions.find(p => p.asset === asset)
+      if (existingOpen) {
+        console.log(`[AI:${t.name}] Already has open ${existingOpen.direction} position in ${asset}, skipping`)
+        decision.action = 'hold'
+        decision.reasoning = `Already have open ${existingOpen.direction} position in ${asset}. ${decision.reasoning}`
+      } else {
+        const side = decision.action === 'open_long' ? 'long' : 'short'
+        const spread = spreadsMap.get(asset)
+        const entryRate = spread?.hl?.rate8h ?? 0
+        const entryPrice = spread?.hl?.markPrice ?? null
+        const tradingFee = size * TRADING_FEE
 
-      await db.from('ai_positions').insert({
-        trader_id: t.id,
-        asset,
-        direction: side,
-        size_usd: size,
-        entry_rate_8h: entryRate,
-        entry_price_approx: entryPrice,
-        funding_collected: 0,
-        fees_paid: tradingFee,
-        last_funding_at: now.toISOString(),
-        is_open: true,
-        opened_at: now.toISOString(),
-      })
+        await db.from('ai_positions').insert({
+          trader_id: t.id,
+          asset,
+          direction: side,
+          size_usd: size,
+          entry_rate_8h: entryRate,
+          entry_price_approx: entryPrice,
+          funding_collected: 0,
+          fees_paid: tradingFee,
+          last_funding_at: now.toISOString(),
+          is_open: true,
+          opened_at: now.toISOString(),
+        })
 
-      cashBalance -= (size + tradingFee)
-      console.log(`[AI:${t.name}] opened ${side.toUpperCase()} ${asset} $${size.toFixed(0)} @ ${entryPrice != null ? `$${entryPrice}` : 'N/A'} — ${decision.reasoning}`)
+        cashBalance -= (size + tradingFee)
+        console.log(`[AI:${t.name}] opened ${side.toUpperCase()} ${asset} $${size.toFixed(0)} @ ${entryPrice != null ? `$${entryPrice}` : 'N/A'} — ${decision.reasoning}`)
+      }
     }
   } else if (decision.action === 'close') {
     const asset = decision.asset
-    const pos = openPositions.find(p => p.asset === asset)
+    const pos = remainingPositions.find(p => p.asset === asset)
     if (pos) {
-      const closeFee = pos.size_usd * TRADING_FEE
-      const spread = spreadsMap.get(pos.asset)
-      const currentPrice = spread?.hl?.markPrice ?? null
-      const unrealizedPnl = computeUnrealizedPnl(pos, currentPrice)
-      // Total PnL = unrealized price PnL + funding collected - fees (entry + exit)
-      const pnl = unrealizedPnl + pos.funding_collected - pos.fees_paid - closeFee
-
-      await db.from('ai_positions').update({
-        is_open: false,
-        closed_at: now.toISOString(),
-        pnl,
-      }).eq('id', pos.id)
-
-      // Return size_usd + unrealized pnl minus exit fee (entry fee was already deducted)
-      cashBalance += pos.size_usd + unrealizedPnl + pos.funding_collected - closeFee
-      console.log(`[AI:${t.name}] closed ${pos.direction.toUpperCase()} ${asset} $${pos.size_usd.toFixed(0)}, unrealized: $${unrealizedPnl.toFixed(2)}, PnL: $${pnl.toFixed(2)} — ${decision.reasoning}`)
+      const cashReturn = await closePosition(db, pos, currentPriceMap, now, decision.reasoning)
+      cashBalance += cashReturn
     } else {
       decision.action = 'hold'
       decision.reasoning = `Tried to close ${asset} but no open position found. ${decision.reasoning}`

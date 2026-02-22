@@ -317,12 +317,13 @@ app.get('/api/ai/traders', async (c) => {
     const { data: decisions } = await db.from('ai_decisions').select('action, reasoning, asset, created_at').eq('trader_id', t.id).order('created_at', { ascending: false }).limit(1)
     const { data: snaps } = await db.from('ai_snapshots').select('total_value').eq('trader_id', t.id).order('snapshot_at', { ascending: true })
 
-    // Mark-to-market: size_usd + unrealized_pnl + funding_collected per position
+    // BUG 1 FIX: Mark-to-market = size_usd + unrealized_price_pnl ONLY
+    // funding_collected is already in cash_balance — do NOT add it again here
     const totalPositionValue = (positions ?? []).reduce((s: number, p: any) => {
       const spread = spreadsMap.get(p.asset) as any
       const currentPrice = spread?.hl?.markPrice ?? null
       const unrealizedPnl = computeAiUnrealizedPnl(p, currentPrice)
-      return s + p.size_usd + unrealizedPnl + (p.funding_collected ?? 0)
+      return s + p.size_usd + unrealizedPnl
     }, 0)
 
     const totalFunding = (allPositions ?? []).reduce((s: number, p: any) => s + (p.funding_collected ?? 0), 0)
@@ -379,9 +380,10 @@ app.get('/api/ai/traders/:name', async (c) => {
     }
   })
 
-  // Mark-to-market total value
+  // BUG 1 FIX: Mark-to-market = size_usd + unrealized_price_pnl ONLY
+  // funding_collected is already in t.cash_balance — do NOT add it again
   const totalPositionValue = enrichedPositions.reduce((s: number, p: any) => {
-    return s + p.size_usd + (p.unrealized_pnl ?? 0) + (p.funding_collected ?? 0)
+    return s + p.size_usd + (p.unrealized_pnl ?? 0)
   }, 0)
 
   const totalValue = t.cash_balance + totalPositionValue
@@ -567,11 +569,12 @@ app.post('/api/internal/snapshot', async (c) => {
     const { data: positions } = await db.from('ai_positions').select('*').eq('trader_id', t.id).eq('is_open', true)
     const { data: allPositions } = await db.from('ai_positions').select('funding_collected').eq('trader_id', t.id)
 
+    // BUG 1 FIX: snapshot value must match API calculation — no funding double-count
     const totalPositionValue = (positions ?? []).reduce((s: number, p: any) => {
       const spread = spreadsMap.get(p.asset) as any
       const currentPrice = spread?.hl?.markPrice ?? null
       const unrealizedPnl = computeAiUnrealizedPnl(p, currentPrice)
-      return s + p.size_usd + unrealizedPnl + (p.funding_collected ?? 0)
+      return s + p.size_usd + unrealizedPnl
     }, 0)
 
     const totalFunding = (allPositions ?? []).reduce((s: number, p: any) => s + (p.funding_collected ?? 0), 0)
