@@ -600,15 +600,50 @@ app.post('/api/internal/snapshot', async (c) => {
   return c.json({ ok: true, snapshotted })
 })
 
+// Admin cleanup — deletes old rows to keep DB within free-tier quota
+app.post('/api/admin/cleanup', async (c) => {
+  const db = await getPaperClient()
+  if (!db) return c.json({ error: 'DB not configured' }, 500)
+  const results: Record<string, any> = {}
+  // Keep only last 7 days of funding snapshots (biggest table — 916 rows every 30s)
+  const { error: e1, count: c1 } = await db
+    .from('funding_snapshots')
+    .delete({ count: 'exact' })
+    .lt('timestamp', new Date(Date.now() - 7 * 86400000).toISOString())
+  results.funding_snapshots = e1 ? e1.message : `deleted ~${c1 ?? 'unknown'} rows`
+  // Keep only last 30 days of paper/ai snapshots
+  const cutoff = new Date(Date.now() - 30 * 86400000).toISOString()
+  for (const table of ['paper_snapshots', 'ai_snapshots']) {
+    const { error, count } = await db.from(table).delete({ count: 'exact' }).lt('captured_at', cutoff)
+    results[table] = error ? error.message : `deleted ~${count ?? 'unknown'} rows`
+  }
+  return c.json({ success: true, results })
+})
+
+let pollCount = 0
+
 // Background polling — fetch every 30 seconds
 async function poll() {
   try {
     const result = await aggregateRates()
     updateCache(result)
-    // Fire and forget DB save
-    saveSnapshot(result.allRates).catch((err) => console.error('[Poll] DB save error:', err))
-    // Run paper trading cycle
+    pollCount++
+    // Save funding snapshot every 10 min (every 20th poll) to limit DB growth
+    if (pollCount % 20 === 0) {
+      saveSnapshot(result.allRates).catch((err) => console.error('[Poll] DB save error:', err))
+    }
+    // Run paper trading cycle every poll
     runPaperTradingCycle().catch((err) => console.error('[Poll] Paper trading error:', err))
+    // Auto-cleanup old funding_snapshots every 24 hours
+    if (pollCount % 2880 === 0) {
+      const db = await getPaperClient()
+      if (db) {
+        db.from('funding_snapshots').delete()
+          .lt('timestamp', new Date(Date.now() - 7 * 86400000).toISOString())
+          .then(() => console.log('[Cleanup] Auto-cleaned funding_snapshots'))
+          .catch((e: Error) => console.error('[Cleanup] Error:', e.message))
+      }
+    }
   } catch (err) {
     console.error('[Poll] Error:', err)
   }
